@@ -16,7 +16,14 @@ import {
   Lock,
   ExternalLink,
   ShieldCheck,
-  Globe
+  Globe,
+  LayoutDashboard,
+  Target,
+  FileText,
+  Info,
+  Download,
+  Menu,
+  X
 } from "lucide-react";
 import { ApplicationStatus, Instrument, DailyReport } from "./types";
 import { ReportCard } from "./components/ReportCard";
@@ -25,6 +32,8 @@ import { AuditPanel } from "./components/AuditPanel";
 import { HistoryReview } from "./components/HistoryReview";
 import { BacktestValidation } from "./components/BacktestValidation";
 import { CmeBulletinImport } from "./components/CmeBulletinImport";
+import { SidebarNav, BottomNav } from "./components/PageNav";
+import { CmeDownloadLinks } from "./components/CmeDownloadLinks";
 import { translations } from "./utils/translations";
 
 export default function App() {
@@ -43,6 +52,10 @@ export default function App() {
   
   // App-wide language configuration defaulting to traditional Chinese ("zh")
   const [lang, setLang] = useState<"zh" | "en">("zh");
+
+  // Sidebar / bottom-nav active page. 四個分頁:dashboard/backtest/cme/about
+  const [activePage, setActivePage] = useState<"dashboard" | "backtest" | "cme" | "about">("dashboard");
+  const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
 
   const t = translations[lang];
 
@@ -249,7 +262,13 @@ export default function App() {
       </header>
 
       {/* 2. Main Desk Layout */}
-      <main className="max-w-7xl mx-auto w-full px-6 py-6 flex-grow space-y-6">
+      <main className="max-w-7xl mx-auto w-full px-6 py-6 flex-grow flex gap-6 pb-24 lg:pb-6">
+
+        {/* Desktop left sidebar */}
+        <SidebarNav active={activePage} onChange={setActivePage} lang={lang} />
+
+        {/* Page content column */}
+        <div className="flex-grow min-w-0 space-y-6">
         
         {/* Scraper Notification Banner */}
         <AnimatePresence>
@@ -279,6 +298,9 @@ export default function App() {
           </div>
         )}
 
+        {/* ===== DASHBOARD PAGE ===== */}
+        {activePage === "dashboard" && (
+        <>
         {/* 2.1 Tab Bar and Layout Controllers */}
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/5 pb-4">
           
@@ -430,17 +452,6 @@ export default function App() {
 
                 {/* Audit Reconciliation Ledger */}
                 <AuditPanel proxy={report.proxy} date={activeDate} lang={lang} />
-
-                {/* Collapsible Timeline History List (includes historical overlay chart) */}
-                <HistoryReview 
-                  instrument={activeInst} 
-                  activeDate={activeDate} 
-                  onSelectDate={(d) => setActiveDate(d)} 
-                  lang={lang}
-                />
-
-                {/* Tier 3 backtest: prediction vs actual (premium-gated; owner sees full) */}
-                <BacktestValidation instrument={activeInst} lang={lang} tier="owner" />
               </>
             )}
           </div>
@@ -495,22 +506,57 @@ export default function App() {
 
             </div>
 
-            {/* In Parallel Mode, both refer to the same audit & history */}
+            {/* In Parallel Mode, both refer to the same audit */}
             {report && (
               <>
                 <AuditPanel proxy={report.proxy} date={activeDate} lang={lang} />
-                <HistoryReview 
-                  instrument="NQ" 
-                  activeDate={activeDate} 
-                  onSelectDate={(d) => setActiveDate(d)} 
-                  lang={lang}
-                />
-                <BacktestValidation instrument="NQ" lang={lang} tier="owner" />
               </>
             )}
           </div>
         )}
+        </>
+        )}
+        {/* ===== END DASHBOARD PAGE ===== */}
 
+        {/* ===== BACKTEST PAGE ===== */}
+        {activePage === "backtest" && (
+          <div className="space-y-6">
+            <div className="glass-card p-5 border-l-4 border-indigo-500/60">
+              <h2 className="font-display font-bold text-base text-white flex items-center gap-2">
+                <Target className="w-5 h-5 text-indigo-400" />
+                {lang === "zh" ? "回測與歷史紀錄分析" : "Backtest & Historical Analysis"}
+              </h2>
+              <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
+                {lang === "zh"
+                  ? "檢視連續交易日的關鍵水位變化,並驗證系統預測 vs 隔日實際走勢。"
+                  : "Review key levels across trading days and validate predictions vs next-day actuals."}
+              </p>
+            </div>
+            <HistoryReview
+              instrument={viewMode === "parallel" ? "NQ" : activeInst}
+              activeDate={activeDate}
+              onSelectDate={(d) => setActiveDate(d)}
+              lang={lang}
+            />
+            <BacktestValidation
+              instrument={viewMode === "parallel" ? "NQ" : activeInst}
+              lang={lang}
+              tier="owner"
+            />
+          </div>
+        )}
+
+        {/* ===== CME PAGE ===== */}
+        {activePage === "cme" && (
+          <div className="space-y-6">
+            <CmeDownloadLinks lang={lang} />
+            <CmeBulletinImport onImported={loadStatus} />
+          </div>
+        )}
+
+        {/* ===== ABOUT PAGE ===== */}
+        {activePage === "about" && (
+        <>
         {/* 2.4 Data Integrity & Quality Verification Guide */}
         <div className="glass-card p-6 bg-[#12161A]/40 border-l-4 border-[#2DD4A7] relative overflow-hidden">
           <div className="absolute top-0 right-0 w-48 h-48 bg-radial from-emerald-500/5 to-transparent rounded-full pointer-events-none" />
@@ -621,9 +667,15 @@ export default function App() {
           </div>
 
         </div>
+        </>
+        )}
+        {/* ===== END ABOUT PAGE ===== */}
 
-        {/* CME NQ futures-options official EOD workflow. This is independent of the existing NDX/SPX proxy report. */}
-        <CmeBulletinImport onImported={loadStatus} />
+        </div>
+        {/* end page content column */}
+
+        {/* Mobile bottom navigation */}
+        <BottomNav active={activePage} onChange={setActivePage} lang={lang} />
 
       </main>
 
