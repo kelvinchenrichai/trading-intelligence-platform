@@ -11,7 +11,7 @@ import {
   SourceStatus,
 } from "../types";
 import { InstrumentMapping, OptionsDataProvider, RawOptionContract } from "../providers/types";
-import { orchestrateOptionData } from "../providers/dataOrchestrator";
+import { OptionDataFetchError, orchestrateOptionData } from "../providers/dataOrchestrator";
 import { getMacroFromFred } from "../providers/fredMacro";
 import { analyzeMarketStructure } from "../utils/engine";
 import { SupabaseStore } from "./supabaseStore";
@@ -264,6 +264,9 @@ export class RealMarketDatabase {
         contracts.push(...result.rawContracts.map((contract) => ({ ...contract, proxy: instrument.indexSymbol })));
       } catch (error: any) {
         const detail = error?.message || String(error);
+        if (error instanceof OptionDataFetchError) {
+          sourceStatuses.push(...error.sourceStatus);
+        }
         warnings.push(`${instrument.futuresCode} (${instrument.indexSymbol}) data retrieval failed: ${detail}`);
       }
     }
