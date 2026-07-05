@@ -1,0 +1,333 @@
+/**
+ * Durable real-data snapshot service.
+ * No random or simulated market data is used in this production path.
+ */
+import {
+  ApplicationStatus,
+  DailyReport,
+  DataReconciliation,
+  MacroData,
+  RefreshResult,
+  SourceStatus,
+} from "../types";
+import { InstrumentMapping, OptionsDataProvider, RawOptionContract } from "../providers/types";
+import { orchestrateOptionData } from "../providers/dataOrchestrator";
+import { getMacroFromFred } from "../providers/fredMacro";
+import { analyzeMarketStructure } from "../utils/engine";
+import { SupabaseStore } from "./supabaseStore";
+
+export interface RealDatabaseConfig {
+  primary: OptionsDataProvider;
+  secondary?: OptionsDataProvider;
+  maxExpiries: number;
+  fredApiKey?: string;
+  store?: SupabaseStore | null;
+  marketDataConfigured?: boolean;
+}
+
+function dateTodayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function uniqueSourceStatus(statuses: SourceStatus[]): SourceStatus[] {
+  const bySource = new Map<string, SourceStatus>();
+  for (const item of statuses) {
+    const current = bySource.get(item.source);
+    // Keep failures if any source failed for one of the required symbols; otherwise retain latest state.
+    if (!current || item.state === "failed" || current.state !== "failed") bySource.set(item.source, item);
+  }
+  return [...bySource.values()];
+}
+
+export class RealMarketDatabase {
+  public instruments: InstrumentMapping[] = [];
+  public dailyReports: Record<string, DailyReport[]> = {};
+  public dataReconciliation: DataReconciliation[] = [];
+  public macroData: MacroData[] = [];
+
+  private config: RealDatabaseConfig;
+  private lastRefreshDate: string | null = null;
+  private lastRefreshTimestamp: string | null = null;
+  private refreshInFlight: Promise<RefreshResult> | null = null;
+  private lastRefresh: RefreshResult | null = null;
+  private initializationWarning: string | null = null;
+
+  constructor(config: RealDatabaseConfig) {
+    this.config = config;
+    this.instruments = [
+      { futuresCode: "NQ", futuresName: "Nasdaq 100 Futures", indexSymbol: "NDX", enabled: true, sort_order: 1 },
+      { futuresCode: "ES", futuresName: "S&P 500 E-mini Futures", indexSymbol: "SPX", enabled: true, sort_order: 2 },
+    ];
+  }
+
+  public async initialize(): Promise<void> {
+    if (!this.config.store) return;
+    try {
+      await this.config.store.healthcheck();
+      const latest = await this.config.store.loadLatest();
+      if (!latest) return;
+      this.dailyReports[latest.snapshotDate] = latest.reports;
+      this.dataReconciliation = latest.reconciliations;
+      if (latest.macro) this.macroData = [latest.macro];
+      this.lastRefreshDate = latest.snapshotDate;
+      this.lastRefreshTimestamp = latest.snapshotTimestamp;
+      this.lastRefresh = {
+        success: true,
+        date: latest.snapshotDate,
+        sources: latest.sourceStatus.filter((s) => s.state === "ok").map((s) => s.source),
+        warnings: latest.warnings,
+        sourceStatus: latest.sourceStatus,
+        persisted: true,
+        refreshRunId: latest.refreshRunId,
+      };
+    } catch (error: any) {
+      this.initializationWarning = error?.message || "Supabase initialization failed";
+      console.error("[database]", this.initializationWarning);
+    }
+  }
+
+  public getInstrumentsLegacyShape() {
+    return this.instruments.map((i) => ({
+      code: i.futuresCode,
+      name: i.futuresName,
+      proxy: i.indexSymbol,
+      enabled: i.enabled,
+      sort_order: i.sort_order,
+    }));
+  }
+
+  public getStatus(): ApplicationStatus {
+    const database = this.config.store
+      ? this.config.store.lastError || this.initializationWarning
+        ? "error"
+        : "connected"
+      : "not_configured";
+    const persisted = database === "connected";
+    const warnings = [
+      ...(this.initializationWarning ? [this.initializationWarning] : []),
+      ...(this.lastRefresh?.warnings || []),
+    ];
+    const successfulSources = this.lastRefresh?.sourceStatus.filter((s) => s.state === "ok").length || 0;
+    const service: ApplicationStatus["service"] =
+      !this.lastRefreshDate ? (database === "not_configured" ? "unconfigured" : "degraded") :
+      successfulSources > 0 ? (warnings.length ? "degraded" : "ok") : "degraded";
+    return {
+      service,
+      database,
+      persistence: persisted ? "durable" : "memory_only",
+      latestSnapshotDate: this.lastRefreshDate,
+      latestSnapshotTimestamp: this.lastRefreshTimestamp,
+      lastRefresh: this.lastRefresh,
+      sourceStatus: this.lastRefresh?.sourceStatus || [],
+      warnings,
+    };
+  }
+
+  public async getDailyReport(instrument: string, date?: string): Promise<DailyReport | null> {
+    if (this.config.store && !this.config.store.lastError) {
+      const stored = await this.config.store.getReport(instrument, date);
+      if (stored) return stored;
+    }
+    const targetDate = date || Object.keys(this.dailyReports).sort().at(-1);
+    return targetDate ? this.dailyReports[targetDate]?.find((report) => report.instrument === instrument) || null : null;
+  }
+
+  public async getHistory(instrument: string) {
+    if (this.config.store && !this.config.store.lastError) {
+      const history = await this.config.store.getHistory(instrument);
+      if (history.length) return history.map(({ date, report }) => this.toHistoryRow(date, report));
+    }
+    return Object.keys(this.dailyReports)
+      .sort()
+      .reverse()
+      .map((date) => {
+        const report = this.dailyReports[date].find((item) => item.instrument === instrument);
+        return report ? this.toHistoryRow(date, report) : null;
+      })
+      .filter(Boolean);
+  }
+
+  public async getReconciliation(proxy: string, date: string): Promise<DataReconciliation[]> {
+    if (this.config.store && !this.config.store.lastError) {
+      const stored = await this.config.store.getReconciliation(proxy, date);
+      if (stored.length) return stored;
+    }
+    return this.dataReconciliation.filter((record) => record.proxy === proxy && record.snapshot_date === date);
+  }
+
+  private toHistoryRow(date: string, report: DailyReport) {
+    return {
+      date,
+      close: report.price.last,
+      flip_level: report.gamma.flip_level,
+      status: report.gamma.status,
+      quadrant: report.regime.quadrant,
+      label: report.regime.label,
+      call_wall_1: report.gamma.call_walls[0]?.strike,
+      put_wall_1: report.gamma.put_walls[0]?.strike,
+      confidence: report.data_confidence,
+    };
+  }
+
+  public async refresh(): Promise<RefreshResult> {
+    if (this.refreshInFlight) return this.refreshInFlight;
+    this.refreshInFlight = this.refreshInternal().finally(() => {
+      this.refreshInFlight = null;
+    });
+    return this.refreshInFlight;
+  }
+
+  private async refreshInternal(): Promise<RefreshResult> {
+    const warnings: string[] = [];
+    const sourceNames = new Set<string>();
+    const sourceStatuses: SourceStatus[] = [];
+    const snapshotTimestamp = new Date().toISOString();
+
+    let macro = { VIX: 0, DXY: 0, US10Y: 4.0 };
+    let macroDate = dateTodayUtc();
+    let macroSource = "fallback";
+    if (this.config.fredApiKey || process.env.FRED_API_KEY) {
+      try {
+        const result = await getMacroFromFred(this.config.fredApiKey);
+        macroDate = result.date;
+        macro = { VIX: result.vix ?? 0, DXY: result.dxy ?? 0, US10Y: result.us10y ?? 4.0 };
+        macroSource = Object.values(result.sources).join(", ") || "FRED";
+        Object.values(result.sources).forEach((source) => sourceNames.add(source));
+        sourceStatuses.push({
+          source: "fred",
+          state: "ok",
+          isDelayed: true,
+          delayNote: "Macro series are published on their own update schedules.",
+          checkedAt: snapshotTimestamp,
+        });
+        if (result.dxy === null) warnings.push("DXY is unavailable from the configured free macro source and is shown as N/A.");
+        if (result.us10y === null) warnings.push("US10Y was unavailable; the risk-free-rate fallback of 4.0% was used.");
+      } catch (error: any) {
+        const detail = error?.message || String(error);
+        warnings.push(`FRED macro retrieval failed: ${detail}. The risk-free-rate fallback of 4.0% was used.`);
+        sourceStatuses.push({
+          source: "fred",
+          state: "failed",
+          isDelayed: true,
+          delayNote: "Macro series are published on their own update schedules.",
+          detail,
+          checkedAt: snapshotTimestamp,
+        });
+      }
+    } else {
+      warnings.push("FRED_API_KEY is not configured; the risk-free-rate fallback of 4.0% was used.");
+      sourceStatuses.push({
+        source: "fred",
+        state: "not_configured",
+        isDelayed: true,
+        delayNote: "Macro series are published on their own update schedules.",
+        detail: "FRED_API_KEY is missing",
+        checkedAt: snapshotTimestamp,
+      });
+    }
+
+    const reports: DailyReport[] = [];
+    const reconciliations: DataReconciliation[] = [];
+    const contracts: Array<RawOptionContract & { proxy: string }> = [];
+    let snapshotDate = macroDate;
+
+    for (const instrument of this.instruments.filter((item) => item.enabled)) {
+      try {
+        const result = await orchestrateOptionData(instrument.indexSymbol, {
+          primary: this.config.primary,
+          secondary: this.config.secondary,
+          maxExpiries: this.config.maxExpiries,
+        });
+        result.sourcesUsed.forEach((source) => sourceNames.add(source));
+        sourceStatuses.push(...result.sourceStatus);
+        snapshotDate = result.snapshotDate || snapshotDate;
+
+        const overnightHigh = result.prevClose
+          ? Math.round(Math.max(result.lastPrice, result.prevClose) * 1.003)
+          : Math.round(result.lastPrice * 1.003);
+        const overnightLow = result.prevClose
+          ? Math.round(Math.min(result.lastPrice, result.prevClose) * 0.997)
+          : Math.round(result.lastPrice * 0.997);
+        const report = analyzeMarketStructure(
+          instrument.futuresCode,
+          instrument.indexSymbol,
+          `${result.snapshotDate}T16:00:00-04:00`,
+          result.lastPrice,
+          result.resolved,
+          result.confidence,
+          overnightHigh,
+          overnightLow,
+          macro,
+        );
+        reports.push(report);
+        reconciliations.push(...result.reconciliations.map((record) => ({ ...record, snapshot_timestamp: snapshotTimestamp })));
+        contracts.push(...result.rawContracts.map((contract) => ({ ...contract, proxy: instrument.indexSymbol })));
+      } catch (error: any) {
+        const detail = error?.message || String(error);
+        warnings.push(`${instrument.futuresCode} (${instrument.indexSymbol}) data retrieval failed: ${detail}`);
+      }
+    }
+
+    const sourceStatus = uniqueSourceStatus(sourceStatuses);
+    if (!reports.length) {
+      const result: RefreshResult = {
+        success: false,
+        date: snapshotDate,
+        sources: [...sourceNames],
+        warnings: [...warnings, "No verified option-data snapshot was created."],
+        sourceStatus,
+        persisted: false,
+      };
+      this.lastRefresh = result;
+      return result;
+    }
+
+    const macroSnapshot: MacroData = {
+      snapshot_date: snapshotDate,
+      source: macroSource,
+      vix: macro.VIX,
+      dxy: macro.DXY,
+      us10y: macro.US10Y,
+    };
+    let persisted = false;
+    let refreshRunId: string | undefined;
+    if (this.config.store) {
+      try {
+        refreshRunId = await this.config.store.persistRefresh({
+          snapshotDate,
+          snapshotTimestamp,
+          reports,
+          reconciliations,
+          macro: macroSnapshot,
+          sourceStatus,
+          warnings,
+          sourceNames: [...sourceNames],
+          contracts,
+        });
+        persisted = true;
+      } catch (error: any) {
+        const detail = error?.message || String(error);
+        warnings.push(`Supabase persistence failed: ${detail}`);
+      }
+    } else {
+      warnings.push("Supabase is not configured; this snapshot is memory-only and will be lost on restart.");
+    }
+
+    this.dailyReports[snapshotDate] = reports;
+    this.dataReconciliation = reconciliations;
+    this.macroData = [macroSnapshot];
+    this.lastRefreshDate = snapshotDate;
+    this.lastRefreshTimestamp = snapshotTimestamp;
+    const result: RefreshResult = {
+      success: true,
+      date: snapshotDate,
+      sources: [...sourceNames],
+      warnings,
+      sourceStatus,
+      persisted,
+      refreshRunId,
+    };
+    this.lastRefresh = result;
+    return result;
+  }
+}

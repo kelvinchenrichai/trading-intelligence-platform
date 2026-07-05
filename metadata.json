@@ -1,0 +1,6 @@
+{
+  "name": "Trading Intelligence Platform",
+  "description": "Pre-market market structure analysis tool providing professional-grade Gamma Exposure (GEX), Gamma Flip, and Wall tracking with multi-source data reconciliation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
