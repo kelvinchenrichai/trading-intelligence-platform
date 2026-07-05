@@ -1,20 +1,25 @@
-# Render / Docker reliability hotfix
-# - installs npm dependencies once (not twice in parallel build stages)
-# - adds retry and timeout settings for transient registry/network failures
+# Render build reliability hotfix v1.0.3
+# Avoids a single stalled npm download holding the build for ~10 minutes.
+# Uses a BuildKit npm cache and installs dependencies only in the build stage.
 
 FROM node:22-alpine AS build
 WORKDIR /app
 
-# More tolerant npm network behavior for transient package-registry timeouts.
+# Use the public registry directly, retry briefly, then fail with a useful log
+# instead of remaining silent for an extended period.
 ENV NPM_CONFIG_REGISTRY=https://registry.npmjs.org/ \
-    NPM_CONFIG_FETCH_RETRIES=5 \
+    NPM_CONFIG_FETCH_RETRIES=2 \
     NPM_CONFIG_FETCH_RETRY_FACTOR=2 \
-    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=10000 \
-    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=120000 \
-    NPM_CONFIG_FETCH_TIMEOUT=600000
+    NPM_CONFIG_FETCH_RETRY_MINTIMEOUT=2000 \
+    NPM_CONFIG_FETCH_RETRY_MAXTIMEOUT=15000 \
+    NPM_CONFIG_FETCH_TIMEOUT=120000 \
+    NPM_CONFIG_PREFER_OFFLINE=true \
+    NPM_CONFIG_AUDIT=false \
+    NPM_CONFIG_FUND=false
 
 COPY package*.json ./
-RUN npm ci --no-audit --no-fund
+# Cache downloaded npm tarballs across compatible BuildKit builds.
+RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund --prefer-offline
 
 COPY . .
 RUN npm run build && npm prune --omit=dev --no-audit --no-fund
