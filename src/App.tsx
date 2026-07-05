@@ -23,6 +23,7 @@ import { ReportCard } from "./components/ReportCard";
 import { GexChart } from "./components/GexChart";
 import { AuditPanel } from "./components/AuditPanel";
 import { HistoryReview } from "./components/HistoryReview";
+import { BacktestValidation } from "./components/BacktestValidation";
 import { CmeBulletinImport } from "./components/CmeBulletinImport";
 import { translations } from "./utils/translations";
 
@@ -437,6 +438,9 @@ export default function App() {
                   onSelectDate={(d) => setActiveDate(d)} 
                   lang={lang}
                 />
+
+                {/* Tier 3 backtest: prediction vs actual (premium-gated; owner sees full) */}
+                <BacktestValidation instrument={activeInst} lang={lang} tier="owner" />
               </>
             )}
           </div>
@@ -501,6 +505,7 @@ export default function App() {
                   onSelectDate={(d) => setActiveDate(d)} 
                   lang={lang}
                 />
+                <BacktestValidation instrument="NQ" lang={lang} tier="owner" />
               </>
             )}
           </div>
