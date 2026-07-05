@@ -23,6 +23,7 @@
  */
 
 import { OptionsDataProvider, RawOptionContract, UnderlyingQuote } from "./types";
+import { normalizeExternalDate } from "./dateUtils";
 
 const BASE = "https://query2.finance.yahoo.com/v7/finance/options";
 
@@ -32,10 +33,6 @@ function toYahooSymbol(symbol: string): string {
   if (s.startsWith("^")) return s;
   // SPX / NDX / VIX 這類指數在 Yahoo 需要 ^ 前綴
   return `^${s}`;
-}
-
-function unixToDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toISOString().split("T")[0];
 }
 
 interface YahooOptionLeg {
@@ -142,7 +139,7 @@ export class YahooFinanceProvider implements OptionsDataProvider {
     out: RawOptionContract[]
   ) {
     if (!expiry) return;
-    const expDate = unixToDate(expiry.expirationDate);
+    const expDate = normalizeExternalDate(expiry.expirationDate, "yahoo expirationDate");
 
     for (const c of expiry.calls || []) {
       out.push({

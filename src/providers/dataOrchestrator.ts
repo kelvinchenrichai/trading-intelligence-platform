@@ -19,6 +19,7 @@
 import { OptionsDataProvider, RawOptionContract } from "./types";
 import { calculateBSGamma } from "../utils/engine";
 import { DataReconciliation, SourceStatus } from "../types";
+import { isIsoDate } from "./dateUtils";
 
 export interface ResolvedOption {
   expiry: string;
@@ -47,6 +48,21 @@ const CONFLICT_THRESHOLD = 0.1;
 
 /** 若某來源缺 IV,退回這個保守預設 (並在 confidence 上反映) */
 const FALLBACK_IV = 0.15;
+
+/**
+ * Preserves provider diagnostics when all option sources fail. The caller can
+ * expose safe source-level statuses through /api/health instead of reducing
+ * every failure to a generic "no snapshot" message.
+ */
+export class OptionDataFetchError extends Error {
+  readonly sourceStatus: SourceStatus[];
+
+  constructor(message: string, sourceStatus: SourceStatus[]) {
+    super(message);
+    this.name = "OptionDataFetchError";
+    this.sourceStatus = sourceStatus;
+  }
+}
 
 interface OrchestratorConfig {
   primary: OptionsDataProvider;
@@ -118,8 +134,12 @@ export async function orchestrateOptionData(
   const haveSecondary = secondaryChain.length > 0;
 
   if (!havePrimary && !haveSecondary) {
-    throw new Error(
-      `無法取得 ${indexSymbol} 的任何真實期權數據。主源錯誤:${primaryError || "未知"}`
+    const detail = sourceStatus
+      .map((item) => `${item.source}: ${item.detail || item.state}`)
+      .join(" | ");
+    throw new OptionDataFetchError(
+      `無法取得 ${indexSymbol} 的任何真實期權數據。${detail || `主源錯誤: ${primaryError || "未知"}`}`,
+      sourceStatus
     );
   }
 
@@ -210,6 +230,9 @@ function reconcileRealSources(
   for (const [key, g] of Object.entries(groups)) {
     const [expiry, strikeStr, option_type] = key.split("_");
     const strike = parseFloat(strikeStr);
+    // Never feed invalid externally-sourced dates into the pricing engine. A bad
+    // row is skipped while other valid strikes/expiries remain usable.
+    if (!isIsoDate(expiry) || !Number.isFinite(strike) || strike <= 0) continue;
     totalCount++;
 
     // 決定採用值:優先主源

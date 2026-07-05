@@ -1,167 +1,218 @@
 /**
- * @license
- * SPDX-License-Identifier: Apache-2.0
+ * Primary provider: MarketData.app.
  *
- * 主數據源:marketdata.app (A 方案)
- *
- * 使用 marketdata.app 的 REST API 取得 SPX / NDX 指數期權鏈。
- * - 免費 "Free Forever" 層:每天 100 credits,只給至少 24 小時前的 EOD 數據。
- *   前一交易日的數據會在隔天美東 09:30 之後才開放取用 —— 這正好符合
- *   「拿昨日 + 開盤前數據算今天」的使用場景。
- * - Token 一律從環境變數讀取,絕不寫死在程式碼裡。
- *
- * ⚠️ 授權提醒:免費層僅授權「個人 / 內部使用」。若要公開營利、對外散布或
- *   公開顯示,必須另外向 marketdata.app 洽談商用授權 (可能還需交易所授權)。
- *   詳見 README 的「合規」章節。
- *
- * API 文件:https://www.marketdata.app/docs/api/options/chain/
+ * The provider intentionally retrieves a small, explicit list of expirations and
+ * then queries each expiration. The chain endpoint defaults to one expiration
+ * when no expiration filter is provided, so selecting expirations first is both
+ * more correct and easier to diagnose than requesting a broad chain and slicing
+ * response rows locally.
  */
-
 import { OptionsDataProvider, RawOptionContract, UnderlyingQuote } from "./types";
+import { ExternalDateValue, firstValidExternalDate, normalizeExternalDate } from "./dateUtils";
 
 const BASE_URL = "https://api.marketdata.app/v1";
 
+type ApiNumber = number | string | null | undefined;
+
 interface OptionChainResponse {
-  s: string; // "ok" | "no_data" | "error"
+  s: string;
   optionSymbol?: string[];
   underlying?: string[];
-  expiration?: number[]; // unix timestamp (秒)
-  strike?: number[];
-  side?: string[]; // "call" | "put"
-  openInterest?: number[];
-  iv?: (number | null)[];
-  volume?: number[];
-  updated?: number[];
+  expiration?: ExternalDateValue[];
+  strike?: ApiNumber[];
+  side?: string[];
+  openInterest?: ApiNumber[];
+  iv?: ApiNumber[];
+  volume?: ApiNumber[];
+  updated?: ExternalDateValue[];
+  errmsg?: string;
+}
+
+interface ExpirationsResponse {
+  s: string;
+  expirations?: ExternalDateValue[];
+  updated?: ExternalDateValue[];
   errmsg?: string;
 }
 
 interface IndexQuoteResponse {
   s: string;
   symbol?: string[];
-  last?: number[];
-  updated?: number[];
+  last?: ApiNumber[];
+  updated?: ExternalDateValue[];
   errmsg?: string;
 }
 
-/** 把 unix 秒轉成 YYYY-MM-DD (以 UTC 為準,期權到期日不受時區小時影響) */
-function unixToDate(unixSeconds: number): string {
-  return new Date(unixSeconds * 1000).toISOString().split("T")[0];
+function toFiniteNumber(value: ApiNumber, fallback = 0): number {
+  const parsed = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function positiveFiniteNumber(value: ApiNumber): number | null {
+  const parsed = toFiniteNumber(value, NaN);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+
+function todayUtc(): string {
+  return new Date().toISOString().slice(0, 10);
 }
 
 export class MarketDataAppProvider implements OptionsDataProvider {
   readonly sourceName = "marketdata";
   readonly isDelayed = true;
-  readonly delayNote = "至少延遲 24 小時 (免費層 EOD;前一交易日資料於隔日美東 09:30 後開放)";
+  readonly delayNote = "依帳號權限取得延遲或歷史期權資料；免費/未授權帳號通常為至少 1 個交易日歷史資料。";
 
   private token: string;
 
   constructor(token?: string) {
-    // Token 只從環境變數讀,呼叫端也可傳入 (但仍應來自 env,不該是明碼字串)
     this.token = token || process.env.MARKETDATA_TOKEN || "";
     if (!this.token) {
-      throw new Error(
-        "[MarketDataAppProvider] 找不到 MARKETDATA_TOKEN。請在 .env 檔設定,不要寫死在程式碼裡。"
-      );
+      throw new Error("[marketdata] MARKETDATA_TOKEN is not configured.");
     }
   }
 
   private authHeaders() {
-    return { Authorization: `Bearer ${this.token}` };
+    return {
+      Authorization: `Bearer ${this.token}`,
+      Accept: "application/json",
+      "User-Agent": "Trading-Intelligence-Platform/1.0",
+    };
   }
 
-  /**
-   * 取得指數收盤價。免費層走 delayed/EOD。
-   * marketdata.app 的指數報價端點:/v1/indices/quotes/{symbol}/
-   */
+  private async requestJson<T>(url: string, context: string): Promise<T> {
+    const res = await fetch(url, { headers: this.authHeaders() });
+    const creditInfo = [
+      res.headers.get("x-api-ratelimit-consumed"),
+      res.headers.get("x-api-ratelimit-remaining"),
+    ].filter(Boolean).join("/");
+
+    if (!res.ok && res.status !== 203) {
+      const text = await res.text().catch(() => "");
+      const suffix = text ? `: ${text.slice(0, 240)}` : "";
+      const credits = creditInfo ? ` [credits consumed/remaining ${creditInfo}]` : "";
+      throw new Error(`[marketdata] ${context} failed with HTTP ${res.status}${credits}${suffix}`);
+    }
+
+    let payload: T;
+    try {
+      payload = (await res.json()) as T;
+    } catch {
+      throw new Error(`[marketdata] ${context} returned a non-JSON response.`);
+    }
+    return payload;
+  }
+
   async getUnderlyingQuote(symbol: string): Promise<UnderlyingQuote> {
     const url = `${BASE_URL}/indices/quotes/${encodeURIComponent(symbol)}/`;
-    const res = await fetch(url, { headers: this.authHeaders() });
-
-    if (res.status === 203 || res.status === 200) {
-      const data = (await res.json()) as IndexQuoteResponse;
-      if (data.s !== "ok" || !data.last || data.last.length === 0) {
-        throw new Error(
-          `[marketdata] 指數 ${symbol} 無報價資料 (s=${data.s}, ${data.errmsg || ""})`
-        );
-      }
-      const dateStr = data.updated?.[0] ? unixToDate(data.updated[0]) : new Date().toISOString().split("T")[0];
-      return { symbol, date: dateStr, last: data.last[0] };
+    const data = await this.requestJson<IndexQuoteResponse>(url, `index quote ${symbol}`);
+    const last = positiveFiniteNumber(data.last?.[0]);
+    if (data.s !== "ok" || last === null) {
+      throw new Error(`[marketdata] index quote ${symbol} has no usable last price (s=${data.s}, ${data.errmsg || "no detail"}).`);
     }
 
-    throw new Error(`[marketdata] 指數報價請求失敗:HTTP ${res.status}`);
+    return {
+      symbol,
+      date: firstValidExternalDate(data.updated, todayUtc(), `marketdata ${symbol} quote updated`),
+      last,
+    };
   }
 
-  /**
-   * 取得期權鏈。
-   *
-   * 為了節省免費層額度,只抓「由近到遠的前 N 個到期日」,並用 API 端的
-   * strikeLimit 把每個到期日的行權價限制在價平附近。
-   *
-   * 免費層固定回傳延遲/EOD 數據,不需要 (也不能) 指定 mode=live。
-   */
   async getOptionChain(symbol: string, maxExpiries: number): Promise<RawOptionContract[]> {
-    // strikeLimit=30 表示每個到期日抓價平上下各約 30 檔;可依需求調整
-    // dte 相關過濾放在下面用 expiry 迴圈控制,這裡先抓全部再截斷
-    const url =
-      `${BASE_URL}/options/chain/${encodeURIComponent(symbol)}/` +
-      `?strikeLimit=40&dateformat=timestamp`;
+    const requestedCount = Math.max(1, Math.min(Number.isFinite(maxExpiries) ? Math.floor(maxExpiries) : 1, 6));
+    const expirationUrl = `${BASE_URL}/options/expirations/${encodeURIComponent(symbol)}/`;
+    const expirationData = await this.requestJson<ExpirationsResponse>(expirationUrl, `${symbol} expiration list`);
 
-    const res = await fetch(url, { headers: this.authHeaders() });
+    if (expirationData.s !== "ok" || !expirationData.expirations?.length) {
+      throw new Error(`[marketdata] ${symbol} has no usable expiration list (s=${expirationData.s}, ${expirationData.errmsg || "no detail"}).`);
+    }
 
-    if (res.status !== 200 && res.status !== 203) {
-      // 204 = 免費層在 cached 模式下沒有資料;其它為錯誤
-      if (res.status === 204) {
-        throw new Error(`[marketdata] ${symbol} 目前無可用的 EOD 期權資料 (204)。`);
+    const expirationDates = Array.from(new Set(
+      expirationData.expirations.flatMap((value) => {
+        try {
+          return [normalizeExternalDate(value, `marketdata ${symbol} expiration`)];
+        } catch {
+          return [];
+        }
+      })
+    )).sort().slice(0, requestedCount);
+
+    if (!expirationDates.length) {
+      throw new Error(`[marketdata] ${symbol} returned expirations, but none could be parsed as dates.`);
+    }
+
+    const allContracts: RawOptionContract[] = [];
+    const perExpiryErrors: string[] = [];
+
+    for (const expiration of expirationDates) {
+      try {
+        const chain = await this.fetchExpirationChain(symbol, expiration);
+        allContracts.push(...chain);
+      } catch (error: any) {
+        perExpiryErrors.push(`${expiration}: ${error?.message || String(error)}`);
       }
-      throw new Error(`[marketdata] 期權鏈請求失敗:HTTP ${res.status}`);
     }
 
-    const data = (await res.json()) as OptionChainResponse;
-    if (data.s !== "ok" || !data.strike || data.strike.length === 0) {
-      throw new Error(
-        `[marketdata] ${symbol} 期權鏈無資料 (s=${data.s}, ${data.errmsg || ""})`
-      );
+    if (!allContracts.length) {
+      const detail = perExpiryErrors.length ? ` Details: ${perExpiryErrors.join(" | ")}` : "";
+      throw new Error(`[marketdata] ${symbol} returned no usable option contracts for ${expirationDates.join(", ")}.${detail}`);
     }
 
-    const n = data.strike.length;
+    return allContracts;
+  }
+
+  private async fetchExpirationChain(symbol: string, expiration: string): Promise<RawOptionContract[]> {
+    // The official API accepts ISO 8601 dates for expiration. We deliberately do
+    // not use the old unsupported `dateformat` query parameter.
+    const url = `${BASE_URL}/options/chain/${encodeURIComponent(symbol)}/?expiration=${encodeURIComponent(expiration)}&strikeLimit=40`;
+    const data = await this.requestJson<OptionChainResponse>(url, `${symbol} chain ${expiration}`);
+
+    if (data.s !== "ok" || !data.strike?.length) {
+      throw new Error(`chain has no rows (s=${data.s}, ${data.errmsg || "no detail"}).`);
+    }
+
+    const snapshotDate = firstValidExternalDate(data.updated, todayUtc(), `marketdata ${symbol} chain updated`);
     const contracts: RawOptionContract[] = [];
+    const rejected = { invalidExpiry: 0, invalidStrike: 0, invalidSide: 0 };
 
-    // 先蒐集所有到期日,決定要保留哪幾個 (由近到遠取 maxExpiries 個)
-    const expirySet = new Set<string>();
-    const expiryByIdx: string[] = [];
-    for (let i = 0; i < n; i++) {
-      const exp = data.expiration?.[i] ? unixToDate(data.expiration[i]) : "";
-      expiryByIdx.push(exp);
-      if (exp) expirySet.add(exp);
-    }
-    const keptExpiries = new Set(
-      Array.from(expirySet).sort().slice(0, maxExpiries)
-    );
-
-    const snapshotDate =
-      data.updated?.[0] ? unixToDate(data.updated[0]) : new Date().toISOString().split("T")[0];
-
-    for (let i = 0; i < n; i++) {
-      const expiry = expiryByIdx[i];
-      if (!keptExpiries.has(expiry)) continue;
-
+    for (let i = 0; i < data.strike.length; i++) {
       const side = (data.side?.[i] || "").toLowerCase();
-      if (side !== "call" && side !== "put") continue;
+      if (side !== "call" && side !== "put") {
+        rejected.invalidSide++;
+        continue;
+      }
+
+      const strike = positiveFiniteNumber(data.strike[i]);
+      if (strike === null) {
+        rejected.invalidStrike++;
+        continue;
+      }
+
+      let rowExpiry = expiration;
+      try {
+        // APIs commonly echo expiration per row. Prefer it when valid; fall back
+        // to the requested expiration when a row field is missing or malformed.
+        if (data.expiration?.[i] !== undefined && data.expiration?.[i] !== null) {
+          rowExpiry = normalizeExternalDate(data.expiration[i], `marketdata ${symbol} row expiration`);
+        }
+      } catch {
+        rejected.invalidExpiry++;
+        continue;
+      }
 
       contracts.push({
         source: this.sourceName,
         snapshot_date: snapshotDate,
-        expiry,
-        strike: data.strike[i],
-        option_type: side as "call" | "put",
-        oi: data.openInterest?.[i] ?? 0,
-        iv: data.iv?.[i] ?? null,
-        volume: data.volume?.[i] ?? 0,
+        expiry: rowExpiry,
+        strike,
+        option_type: side,
+        oi: Math.max(0, Math.trunc(toFiniteNumber(data.openInterest?.[i], 0))),
+        iv: positiveFiniteNumber(data.iv?.[i]),
+        volume: Math.max(0, Math.trunc(toFiniteNumber(data.volume?.[i], 0))),
       });
     }
 
-    if (contracts.length === 0) {
-      throw new Error(`[marketdata] ${symbol} 篩選後無有效合約 (檢查到期日/行權價範圍)。`);
+    if (!contracts.length) {
+      throw new Error(`chain rows could not be normalized (invalid expiry=${rejected.invalidExpiry}, strike=${rejected.invalidStrike}, side=${rejected.invalidSide}).`);
     }
 
     return contracts;
