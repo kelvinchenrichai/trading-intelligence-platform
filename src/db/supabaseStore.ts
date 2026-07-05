@@ -4,6 +4,7 @@
  */
 import { DailyReport, DataReconciliation, MacroData, SourceStatus } from "../types";
 import { RawOptionContract } from "../providers/types";
+import { CmeNqImportResult, StoredCmeImport } from "../cme/types";
 
 export interface RefreshPayload {
   snapshotDate: string;
@@ -233,4 +234,85 @@ export class SupabaseStore {
     for (const part of chunks(contractRows)) await this.request("POST", "option_contracts", {}, part, "return=minimal");
     return refreshRunId;
   }
+
+  async persistCmeImport(payload: CmeNqImportResult): Promise<StoredCmeImport> {
+    const summary = {
+      tradeDate: payload.tradeDate,
+      bulletinDateText: payload.bulletinDateText,
+      parserVersion: payload.parserVersion,
+      underlyingContract: payload.underlyingContract,
+      futuresSettlement: payload.futuresSettlement,
+      contractCount: payload.contractCount,
+      expirySummaries: payload.expirySummaries,
+      warnings: payload.warnings,
+    };
+    const existing = await this.request<any[]>("GET", "cme_bulletin_imports", {
+      select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,created_at,warnings,summary_json",
+      sha256: `eq.${payload.sha256}`,
+      limit: "1",
+    });
+    if (existing[0]) return this.mapCmeImport(existing[0]);
+
+    const rows = await this.request<any[]>("POST", "cme_bulletin_imports", { select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,created_at,warnings,summary_json" }, {
+      trade_date: payload.tradeDate,
+      bulletin_date_text: payload.bulletinDateText,
+      source_file_name: payload.fileName,
+      sha256: payload.sha256,
+      parser_version: payload.parserVersion,
+      underlying_contract: payload.underlyingContract,
+      futures_settlement: payload.futuresSettlement,
+      contract_count: payload.contractCount,
+      status: "parsed",
+      warnings: payload.warnings,
+      summary_json: summary,
+    }, "return=representation");
+    const imported = rows[0];
+    if (!imported?.id) throw new Error("Supabase did not return a CME import id.");
+
+    const optionRows = payload.contracts.map((contract) => ({
+      import_id: imported.id,
+      trade_date: contract.tradeDate,
+      underlying_contract: contract.underlyingContract,
+      option_family: contract.optionFamily,
+      option_code: contract.optionCode,
+      expiry_label: contract.expiryLabel,
+      expiry_date: contract.expiryDate,
+      expiry_precision: contract.expiryPrecision,
+      option_type: contract.optionType,
+      strike: contract.strike,
+      settlement: contract.settlement,
+      delta: contract.delta,
+      open_interest: contract.openInterest,
+      volume: contract.volume,
+      source_page: contract.sourcePage,
+      raw_row_json: contract.rawRow,
+    }));
+    for (const part of chunks(optionRows)) await this.request("POST", "cme_nq_option_contracts", {}, part, "return=minimal");
+    return this.mapCmeImport(imported);
+  }
+
+  async listCmeImports(): Promise<StoredCmeImport[]> {
+    const rows = await this.request<any[]>("GET", "cme_bulletin_imports", {
+      select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,created_at,warnings,summary_json",
+      order: "created_at.desc",
+      limit: "30",
+    });
+    return rows.map((row) => this.mapCmeImport(row));
+  }
+
+  private mapCmeImport(row: any): StoredCmeImport {
+    const summary = asObject(row.summary_json, {} as any);
+    return {
+      id: row.id,
+      tradeDate: row.trade_date,
+      underlyingContract: row.underlying_contract,
+      futuresSettlement: Number(row.futures_settlement),
+      contractCount: Number(row.contract_count),
+      fileName: row.source_file_name,
+      createdAt: row.created_at,
+      warnings: asObject<string[]>(row.warnings, []),
+      summary,
+    };
+  }
+
 }

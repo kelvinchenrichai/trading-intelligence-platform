@@ -1,47 +1,24 @@
-# Trading Intelligence Platform (TIP) — Research MVP
+# Trading Intelligence Platform — V2 CME Import Foundation
 
-A private, durable **NQ / ES pre-market options-structure research tool** built on NDX / SPX option proxies. The production path uses no simulated market data. It persists daily reports, provider reconciliation records, raw option contracts, and macro snapshots to Supabase.
+This version keeps the existing NDX/SPX research path and adds a separate, user-uploaded CME Daily Bulletin PG40 importer for NQ futures options.
 
-## What this build does
+## New in V2
 
-- MarketData.app primary data provider; Yahoo Finance fallback / reconciliation provider.
-- FRED macro lookup with transparent fallbacks.
-- OI-based Gamma Exposure (GEX) proxy, Gamma Flip, Call Wall, Put Wall, Expected Move, and regime output.
-- Supabase persistence for snapshot history and Audit Ledger.
-- `/api/health` and user-visible data-source failure states.
-- Railway-ready web service and separate scheduled refresh service.
+- Private `CME official EOD import` screen in the dashboard.
+- Protected PDF upload endpoint: `POST /api/cme/import`.
+- Parses CME Section 40 NQ option rows from a user-provided PDF using coordinate-preserving Poppler extraction.
+- Persists CME import metadata and rows in Supabase tables created by `supabase/002_cme_bulletin_import.sql`.
+- Stores source filename, SHA-256, parser version, page number, raw parsed row, settlement, OI, volume, delta, expiry group, and estimated expiry date.
+- Does **not** auto-download / scrape CME PDFs.
 
-## What it does not claim to do
+## Deploy update
 
-This is **not** a real-time OPRA feed, direct dealer-positioning system, trade-execution engine, payment platform, or investment-advice product. It uses delayed / EOD data and an OI-based proxy model.
+1. Run `supabase/002_cme_bulletin_import.sql` once in Supabase SQL Editor.
+2. Replace your GitHub repository with this project update.
+3. Render will rebuild. The Docker image installs `poppler-utils` for PDF parsing.
+4. Keep `AUTO_REFRESH_ON_START=false`.
+5. Open the homepage and use the CME importer with your existing `REFRESH_API_TOKEN`.
 
-## Start here
+## Current scope
 
-Read **[DEPLOYMENT_GUIDE_ZH.md](./DEPLOYMENT_GUIDE_ZH.md)** for the complete Chinese deployment and test procedure.
-
-## Required production variables
-
-```env
-MARKETDATA_TOKEN=
-FRED_API_KEY=
-SUPABASE_URL=
-SUPABASE_SECRET_KEY=
-MAX_EXPIRIES=4
-NODE_ENV=production
-```
-
-Copy `.env.example` to `.env` for local work. Never commit `.env`.
-
-## Commands
-
-```bash
-npm ci
-npm run dev
-npm run lint
-npm run build
-npm run refresh
-```
-
-## Database migration
-
-Run `supabase/001_initial_schema.sql` once in the Supabase SQL Editor before the first refresh.
+This is the durable CME data-ingestion foundation. It does not yet represent a final Black-76 GEX / dealer-flow engine. Expiry dates for weekly/daily products are explicitly marked `estimated` until contract-calendar validation is completed.

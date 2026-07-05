@@ -1,12 +1,15 @@
 /** Trading Intelligence Platform API server. */
 import "dotenv/config";
 import express from "express";
+import multer from "multer";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import { RealMarketDatabase } from "./src/db/realDatabase";
 import { SupabaseStore } from "./src/db/supabaseStore";
 import { MarketDataAppProvider } from "./src/providers/marketDataApp";
 import { YahooFinanceProvider } from "./src/providers/yahooFinance";
+import { CmeImportService } from "./src/cme/service";
+import { parseCmeSection40 } from "./src/cme/parser";
 
 async function buildDatabase(): Promise<RealMarketDatabase> {
   const yahoo = new YahooFinanceProvider();
@@ -39,11 +42,17 @@ function refreshAuthorized(req: express.Request): boolean {
 
 async function startServer() {
   const app = express();
+  const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1, fields: 4 }, fileFilter: (_req, file, callback) => {
+    const allowed = file.mimetype === "application/pdf" || file.originalname.toLowerCase().endsWith(".pdf");
+    if (allowed) callback(null, true);
+    else callback(new Error("Only PDF uploads are accepted."));
+  } });
   const PORT = Number(process.env.PORT || 3000);
   app.use(express.json({ limit: "1mb" }));
   app.disable("x-powered-by");
 
   const database = await buildDatabase();
+  const cmeImports = new CmeImportService(SupabaseStore.fromEnvironment());
 
   app.get("/api/health", (_req, res) => {
     const status = database.getStatus();
@@ -52,6 +61,26 @@ async function startServer() {
   });
 
   app.get("/api/instruments", (_req, res) => res.json(database.getInstrumentsLegacyShape()));
+
+  app.get("/api/cme/imports", async (_req, res) => {
+    try { return res.json(await cmeImports.list()); }
+    catch (error: any) { return res.status(503).json({ error: error?.message || "Unable to load CME import history.", code: "CME_STORE_ERROR" }); }
+  });
+
+  app.post("/api/cme/import", upload.single("bulletin"), async (req, res) => {
+    if (process.env.CME_PG40_IMPORT_ENABLED === "false") return res.status(404).json({ error: "CME import is disabled.", code: "CME_IMPORT_DISABLED" });
+    if (!refreshAuthorized(req)) return res.status(403).json({ error: "CME import is protected. Enter your private Refresh Token.", code: "CME_IMPORT_FORBIDDEN" });
+    if (!cmeImports.configured) return res.status(503).json({ error: "Supabase is required before importing a CME bulletin.", code: "CME_STORE_NOT_CONFIGURED" });
+    if (!req.file?.buffer) return res.status(400).json({ error: "Missing PDF file field 'bulletin'.", code: "CME_FILE_MISSING" });
+    try {
+      const parsed = await parseCmeSection40(req.file.buffer, req.file.originalname);
+      const stored = await cmeImports.persist(parsed);
+      return res.status(201).json({ ...stored, tradeDate: parsed.tradeDate, contractCount: parsed.contractCount, expirySummaries: parsed.expirySummaries, warnings: parsed.warnings });
+    } catch (error: any) {
+      console.error("[cme-import]", error?.message || error);
+      return res.status(422).json({ error: error?.message || "CME PDF could not be parsed.", code: "CME_PARSE_FAILED" });
+    }
+  });
 
   app.get("/api/daily-report", async (req, res) => {
     const instrument = String(req.query.instrument || "").toUpperCase();

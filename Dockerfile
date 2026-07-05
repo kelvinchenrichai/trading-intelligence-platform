@@ -7,6 +7,7 @@ RUN npm run build
 
 FROM node:22-alpine AS runtime
 WORKDIR /app
+RUN apk add --no-cache poppler-utils
 ENV NODE_ENV=production
 COPY package*.json ./
 RUN npm ci --omit=dev

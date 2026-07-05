@@ -23,6 +23,7 @@ import { ReportCard } from "./components/ReportCard";
 import { GexChart } from "./components/GexChart";
 import { AuditPanel } from "./components/AuditPanel";
 import { HistoryReview } from "./components/HistoryReview";
+import { CmeBulletinImport } from "./components/CmeBulletinImport";
 import { translations } from "./utils/translations";
 
 export default function App() {
@@ -615,6 +616,9 @@ export default function App() {
           </div>
 
         </div>
+
+        {/* CME NQ futures-options official EOD workflow. This is independent of the existing NDX/SPX proxy report. */}
+        <CmeBulletinImport onImported={loadStatus} />
 
       </main>
 
