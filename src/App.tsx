@@ -34,6 +34,8 @@ import { BacktestValidation } from "./components/BacktestValidation";
 import { CmeBulletinImport } from "./components/CmeBulletinImport";
 import { SidebarNav, BottomNav } from "./components/PageNav";
 import { CmeDownloadLinks } from "./components/CmeDownloadLinks";
+import { AuthButton } from "./components/AuthButton";
+import { useAuth } from "./auth";
 import { translations } from "./utils/translations";
 
 export default function App() {
@@ -52,6 +54,10 @@ export default function App() {
   
   // App-wide language configuration defaulting to traditional Chinese ("zh")
   const [lang, setLang] = useState<"zh" | "en">("zh");
+
+  // 認證狀態 (Google 登入)。role: admin(最高權限) / member / guest
+  const auth = useAuth();
+  const isAdmin = auth.role === "admin";
 
   // Sidebar / bottom-nav active page. 四個分頁:dashboard/backtest/cme/about
   const [activePage, setActivePage] = useState<"dashboard" | "backtest" | "cme" | "about">("dashboard");
@@ -239,6 +245,8 @@ export default function App() {
             </div>
 
             {/* Manual snapshot action; protected by default in production. */}
+            {/* Manual snapshot: 限最高權限,避免訪客消耗 API 額度 */}
+            {isAdmin && (
             <button
               onClick={triggerScrape}
               disabled={scraping}
@@ -247,6 +255,10 @@ export default function App() {
               <RefreshCw className={`w-3.5 h-3.5 ${scraping ? "animate-spin" : ""}`} />
               <span>{scraping ? (lang === "zh" ? "更新快照中..." : "Refreshing...") : (lang === "zh" ? "更新 EOD 快照" : "Refresh EOD Snapshot")}</span>
             </button>
+            )}
+
+            {/* Google 登入 / 使用者選單 */}
+            <AuthButton lang={lang} auth={auth} />
 
             {/* Simulated Premium unlock */}
             <button 
@@ -546,12 +558,34 @@ export default function App() {
           </div>
         )}
 
-        {/* ===== CME PAGE ===== */}
+        {/* ===== CME PAGE (最高權限 only) ===== */}
         {activePage === "cme" && (
-          <div className="space-y-6">
-            <CmeDownloadLinks lang={lang} />
-            <CmeBulletinImport onImported={loadStatus} />
-          </div>
+          isAdmin ? (
+            <div className="space-y-6">
+              <CmeDownloadLinks lang={lang} />
+              <CmeBulletinImport onImported={loadStatus} />
+            </div>
+          ) : (
+            <div className="glass-card p-10 flex flex-col items-center justify-center text-center gap-4">
+              <Lock className="w-10 h-10 text-[#F2A93B]/70" />
+              <h3 className="font-display font-bold text-base text-white">
+                {lang === "zh" ? "CME 官方數據 — 限最高權限" : "CME Official Data — Admin Only"}
+              </h3>
+              <p className="text-sm text-slate-400 max-w-md leading-relaxed">
+                {lang === "zh"
+                  ? "此頁為 CME 官方 EOD 數據匯入區,僅限管理員存取。若你是管理員,請使用右上角的 Google 登入。"
+                  : "This CME official EOD import area is restricted to admins. If you are the admin, please sign in with Google (top right)."}
+              </p>
+              {!auth.user && (
+                <button
+                  onClick={auth.signInWithGoogle}
+                  className="flex items-center gap-2 bg-white hover:bg-slate-100 text-slate-800 px-4 py-2.5 rounded-lg text-xs font-bold transition-all cursor-pointer"
+                >
+                  <span>{lang === "zh" ? "使用 Google 登入" : "Sign in with Google"}</span>
+                </button>
+              )}
+            </div>
+          )
         )}
 
         {/* ===== ABOUT PAGE ===== */}
