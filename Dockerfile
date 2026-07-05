@@ -22,6 +22,18 @@ COPY package*.json ./
 RUN --mount=type=cache,target=/root/.npm npm ci --no-audit --no-fund --prefer-offline
 
 COPY . .
+
+# --- 前端 (Vite) build-time 變數 ---
+# VITE_ 變數必須在「執行 vite build 時」就存在於環境,才會被打包進前端靜態檔。
+# Render 的環境變數預設只給 runtime,因此這裡用 ARG 接收、轉成 ENV 供 build 使用。
+# 這些是可公開的前端變數 (publishable key / 網址),不含任何後端 secret。
+ARG VITE_SUPABASE_URL
+ARG VITE_SUPABASE_ANON_KEY
+ARG VITE_ADMIN_EMAILS
+ENV VITE_SUPABASE_URL=$VITE_SUPABASE_URL \
+    VITE_SUPABASE_ANON_KEY=$VITE_SUPABASE_ANON_KEY \
+    VITE_ADMIN_EMAILS=$VITE_ADMIN_EMAILS
+
 RUN npm run build && npm prune --omit=dev --no-audit --no-fund
 
 FROM node:22-alpine AS runtime
