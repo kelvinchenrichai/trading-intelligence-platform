@@ -60,6 +60,26 @@ async function startServer() {
     res.status(code).json(status);
   });
 
+  // 提供前端「執行時」讀取 Supabase 設定 (避免依賴 build 階段的 VITE_ 變數)。
+  // 這些都是可公開的前端設定 (publishable key / 網址),不含任何後端 secret。
+  // 優先讀 VITE_ 前綴,若沒設則退回同名的一般環境變數,兩種設法都能運作。
+  app.get("/api/config", (_req, res) => {
+    res.json({
+      supabaseUrl:
+        process.env.VITE_SUPABASE_URL || process.env.SUPABASE_URL || "",
+      supabaseAnonKey:
+        process.env.VITE_SUPABASE_ANON_KEY ||
+        process.env.SUPABASE_ANON_KEY ||
+        process.env.SUPABASE_PUBLISHABLE_KEY ||
+        "",
+      adminEmails: (
+        process.env.VITE_ADMIN_EMAILS ||
+        process.env.ADMIN_EMAILS ||
+        "kelvinchen20000108@gmail.com"
+      ),
+    });
+  });
+
   app.get("/api/instruments", (_req, res) => res.json(database.getInstrumentsLegacyShape()));
 
   app.get("/api/cme/imports", async (_req, res) => {

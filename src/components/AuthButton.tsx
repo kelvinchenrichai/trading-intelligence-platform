@@ -10,7 +10,7 @@
 
 import React, { useState } from "react";
 import { LogIn, LogOut, ShieldCheck, User as UserIcon, ChevronDown } from "lucide-react";
-import { useAuth, isAuthConfigured, UserRole } from "../auth";
+import { useAuth, UserRole } from "../auth";
 
 interface AuthButtonProps {
   lang?: "zh" | "en";
@@ -35,7 +35,7 @@ export const AuthButton: React.FC<AuthButtonProps> = ({ lang = "zh", auth }) => 
   const [menuOpen, setMenuOpen] = useState(false);
   const { user, role, loading, signInWithGoogle, signOut } = auth;
 
-  if (!isAuthConfigured) {
+  if (!auth.configured) {
     return (
       <span className="text-[10px] font-mono text-slate-500 border border-white/5 px-2.5 py-1.5 rounded-lg">
         {isZh ? "登入尚未設定" : "Auth not configured"}

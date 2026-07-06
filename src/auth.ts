@@ -2,104 +2,122 @@
  * @license
  * SPDX-License-Identifier: Apache-2.0
  *
- * 前端 Supabase 認證 (Google 登入)
+ * 前端 Supabase 認證 (Google 登入) — runtime 設定版
  *
- * 使用 Supabase 內建的 Google OAuth。前端只用「anon public key」
- * (可安全公開的金鑰),絕不使用後端的 service/secret key。
- *
- * 需要的環境變數 (在 .env,前端變數必須以 VITE_ 開頭才會被 Vite 打包):
- *   VITE_SUPABASE_URL       你的 Supabase 專案網址
- *   VITE_SUPABASE_ANON_KEY  Supabase 的 anon public key
- *   VITE_ADMIN_EMAILS       最高權限 email,逗號分隔 (預設含你的帳號)
- *
- * OAuth 用 redirect 流程 (非彈窗),因此 LINE 內建瀏覽器也能正常運作。
+ * 不再依賴 build 階段的 VITE_ 變數 (那需要 Docker build args,在 Render 上容易
+ * 漏設導致前端拿不到金鑰、出現 401 "No API key found")。改為瀏覽器啟動時向後端
+ * /api/config 動態取得 Supabase 網址與 publishable key。這些值都是可公開的前端
+ * 設定,不含後端 secret。
  */
 
-import { createClient, Session, User } from "@supabase/supabase-js";
+import { createClient, Session, SupabaseClient, User } from "@supabase/supabase-js";
 import { useEffect, useState } from "react";
 
-const SUPABASE_URL = import.meta.env.VITE_SUPABASE_URL as string | undefined;
-const SUPABASE_ANON_KEY = import.meta.env.VITE_SUPABASE_ANON_KEY as string | undefined;
+export type UserRole = "admin" | "member" | "guest";
 
-// 最高權限 email 清單:優先讀環境變數,並永遠包含擁有者帳號作為保底。
-const ADMIN_EMAILS = (
-  (import.meta.env.VITE_ADMIN_EMAILS as string | undefined) || ""
-)
-  .split(",")
-  .map((e) => e.trim().toLowerCase())
-  .filter(Boolean);
-if (!ADMIN_EMAILS.includes("kelvinchen20000108@gmail.com")) {
-  ADMIN_EMAILS.push("kelvinchen20000108@gmail.com");
+interface RuntimeConfig {
+  supabaseUrl: string;
+  supabaseAnonKey: string;
+  adminEmails: string[];
 }
 
-// 若環境變數未設定,supabase 為 null;UI 會顯示「登入尚未設定」而不是崩潰。
-export const supabase =
-  SUPABASE_URL && SUPABASE_ANON_KEY
-    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY)
-    : null;
+let cachedClient: SupabaseClient | null = null;
+let cachedConfig: RuntimeConfig | null = null;
+let configPromise: Promise<RuntimeConfig | null> | null = null;
 
-export const isAuthConfigured = Boolean(supabase);
+async function loadConfig(): Promise<RuntimeConfig | null> {
+  if (cachedConfig) return cachedConfig;
+  if (configPromise) return configPromise;
 
-export type UserRole = "admin" | "member" | "guest";
+  configPromise = (async () => {
+    try {
+      const res = await fetch("/api/config");
+      if (!res.ok) return null;
+      const data = await res.json();
+      const url = (data.supabaseUrl || "").trim();
+      const key = (data.supabaseAnonKey || "").trim();
+      const admins = String(data.adminEmails || "")
+        .split(",")
+        .map((e: string) => e.trim().toLowerCase())
+        .filter(Boolean);
+      if (!admins.includes("kelvinchen20000108@gmail.com")) {
+        admins.push("kelvinchen20000108@gmail.com");
+      }
+      if (!url || !key) {
+        cachedConfig = { supabaseUrl: "", supabaseAnonKey: "", adminEmails: admins };
+        return cachedConfig;
+      }
+      cachedConfig = { supabaseUrl: url, supabaseAnonKey: key, adminEmails: admins };
+      cachedClient = createClient(url, key);
+      return cachedConfig;
+    } catch {
+      return null;
+    }
+  })();
+
+  return configPromise;
+}
+
+function roleForEmail(email: string | undefined | null, admins: string[]): UserRole {
+  if (!email) return "guest";
+  return admins.includes(email.toLowerCase()) ? "admin" : "member";
+}
 
 export interface AuthState {
   user: User | null;
   session: Session | null;
   role: UserRole;
   loading: boolean;
+  configured: boolean;
 }
 
-function roleForEmail(email: string | undefined | null): UserRole {
-  if (!email) return "guest";
-  return ADMIN_EMAILS.includes(email.toLowerCase()) ? "admin" : "member";
-}
-
-/** React hook:管理登入狀態與角色 */
 export function useAuth(): AuthState & {
   signInWithGoogle: () => Promise<void>;
   signOut: () => Promise<void>;
 } {
   const [session, setSession] = useState<Session | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
+  const [configured, setConfigured] = useState<boolean>(false);
+  const [admins, setAdmins] = useState<string[]>(["kelvinchen20000108@gmail.com"]);
 
   useEffect(() => {
-    if (!supabase) {
+    let active = true;
+    (async () => {
+      const cfg = await loadConfig();
+      if (!active) return;
+      if (cfg) setAdmins(cfg.adminEmails);
+      if (cachedClient) {
+        setConfigured(true);
+        const { data } = await cachedClient.auth.getSession();
+        if (!active) return;
+        setSession(data.session);
+        cachedClient.auth.onAuthStateChange((_e, s) => {
+          setSession(s);
+        });
+      }
       setLoading(false);
-      return;
-    }
-    // 取得目前 session
-    supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
-      setLoading(false);
-    });
-    // 監聽登入/登出變化
-    const { data: sub } = supabase.auth.onAuthStateChange((_event, s) => {
-      setSession(s);
-    });
+    })();
     return () => {
-      sub.subscription.unsubscribe();
+      active = false;
     };
   }, []);
 
   const signInWithGoogle = async () => {
-    if (!supabase) return;
-    await supabase.auth.signInWithOAuth({
+    if (!cachedClient) return;
+    await cachedClient.auth.signInWithOAuth({
       provider: "google",
-      options: {
-        // 登入完成後導回目前網址 (redirect 流程,LINE 瀏覽器相容)
-        redirectTo: window.location.origin,
-      },
+      options: { redirectTo: window.location.origin },
     });
   };
 
   const signOut = async () => {
-    if (!supabase) return;
-    await supabase.auth.signOut();
+    if (!cachedClient) return;
+    await cachedClient.auth.signOut();
     setSession(null);
   };
 
   const user = session?.user ?? null;
-  const role = roleForEmail(user?.email);
+  const role = roleForEmail(user?.email, admins);
 
-  return { user, session, role, loading, signInWithGoogle, signOut };
+  return { user, session, role, loading, configured, signInWithGoogle, signOut };
 }

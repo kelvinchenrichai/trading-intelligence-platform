@@ -35,6 +35,7 @@ import { CmeBulletinImport } from "./components/CmeBulletinImport";
 import { SidebarNav, BottomNav } from "./components/PageNav";
 import { CmeDownloadLinks } from "./components/CmeDownloadLinks";
 import { AuthButton } from "./components/AuthButton";
+import { LoginPage } from "./components/LoginPage";
 import { useAuth } from "./auth";
 import { translations } from "./utils/translations";
 
@@ -185,6 +186,19 @@ export default function App() {
         return "bg-[#F2545B]";
     }
   };
+
+  // 會員制:未登入時整頁顯示登入頁,登入後才進入主系統。
+  // auth 載入中先顯示簡單載入畫面,避免閃爍。
+  if (auth.loading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-[#0A0E12] text-slate-400 font-mono text-sm">
+        {lang === "zh" ? "載入中…" : "Loading…"}
+      </div>
+    );
+  }
+  if (!auth.user) {
+    return <LoginPage lang={lang} auth={auth} />;
+  }
 
   return (
     <div className="min-h-screen bg-[#0B0E0D] text-slate-100 font-sans flex flex-col justify-between">
