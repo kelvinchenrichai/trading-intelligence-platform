@@ -301,6 +301,12 @@ export function analyzeMarketStructure(
   }
   flipLevel = Math.round(flipLevel * 10) / 10;
 
+  // Flip 可靠性防呆:掃描範圍是 spot ±8%。若沒找到真實零交叉,或算出的 flip
+  // 貼在掃描邊界 (離現貨 >7%),代表真正的翻轉點不在數據覆蓋範圍內,
+  // 這個 flip 只是邊界假象 —— 此時將整份報告信度強制降為 low,提醒使用者。
+  const flipUnreliable =
+    !foundFlip || Math.abs(flipLevel - lastPrice) / lastPrice > 0.07;
+
   // 4. Call Wall / Put Wall
   // Standard: Call Wall is highest positive net GEX strike, Put Wall is most negative net GEX strike
   const sortedByGexDesc = [...gexStrikes].sort((a, b) => b.net_gex - a.net_gex);
@@ -396,7 +402,7 @@ export function analyzeMarketStructure(
     proxy,
     enabled: true,
     as_of: asOf,
-    data_confidence: dataConfidence,
+    data_confidence: flipUnreliable ? "low" : dataConfidence,
     gamma: {
       status,
       flip_level: flipLevel,

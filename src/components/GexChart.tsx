@@ -70,10 +70,12 @@ export const GexChart: React.FC<GexChartProps> = ({
 
   // 計算 GEX Profile 累積曲線 (由低 strike 往高 strike 累加 net_gex)
   let cumulative = 0;
-  const withProfile = sorted.map((d) => {
+  const ascending = sorted.map((d) => {
     cumulative += d.net_gex;
     return { ...d, profile: cumulative };
   });
+  // 顯示順序:高價在上、低價在下 (交易圖表慣例;修正先前 Y 軸方向顛倒的問題)
+  const withProfile = [...ascending].reverse();
 
   // 決定 Call Wall / Put Wall:優先用傳入值,否則從資料推導
   const resolvedCallWall =

@@ -163,7 +163,10 @@ export class MarketDataAppProvider implements OptionsDataProvider {
   private async fetchExpirationChain(symbol: string, expiration: string): Promise<RawOptionContract[]> {
     // The official API accepts ISO 8601 dates for expiration. We deliberately do
     // not use the old unsupported `dateformat` query parameter.
-    const url = `${BASE_URL}/options/chain/${encodeURIComponent(symbol)}/?expiration=${encodeURIComponent(expiration)}&strikeLimit=40`;
+    // 覆蓋範圍:預設價平上下各約 120 檔 (STRIKE_LIMIT 環境變數可調)。
+    // 先前 40 檔太窄,導致 Call/Put Wall 只是局部高點、Flip 落在掃描邊界。
+    const strikeLimit = Number.parseInt(process.env.STRIKE_LIMIT || "120", 10);
+    const url = `${BASE_URL}/options/chain/${encodeURIComponent(symbol)}/?expiration=${encodeURIComponent(expiration)}&strikeLimit=${strikeLimit}`;
     const data = await this.requestJson<OptionChainResponse>(url, `${symbol} chain ${expiration}`);
 
     if (data.s !== "ok" || !data.strike?.length) {
