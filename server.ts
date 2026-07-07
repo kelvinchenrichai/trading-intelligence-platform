@@ -31,7 +31,9 @@ async function buildDatabase(): Promise<RealMarketDatabase> {
 }
 
 function isPublicRefreshAllowed(): boolean {
-  return process.env.ALLOW_PUBLIC_MANUAL_REFRESH === "true";
+  // 預設允許手動刷新 (刷新按鈕在前端已限 admin 才看得到)。
+  // 若要關閉,明確設 ALLOW_PUBLIC_MANUAL_REFRESH=false。
+  return process.env.ALLOW_PUBLIC_MANUAL_REFRESH !== "false";
 }
 
 function refreshAuthorized(req: express.Request): boolean {
