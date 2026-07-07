@@ -14,6 +14,7 @@ import { InstrumentMapping, OptionsDataProvider, RawOptionContract } from "../pr
 import { OptionDataFetchError, orchestrateOptionData } from "../providers/dataOrchestrator";
 import { getMacroFromFred } from "../providers/fredMacro";
 import { analyzeMarketStructure } from "../utils/engine";
+import { fetchFuturesBasis, applyBasisToReport } from "../providers/futuresBasis";
 import { SupabaseStore } from "./supabaseStore";
 
 export interface RealDatabaseConfig {
@@ -259,6 +260,21 @@ export class RealMarketDatabase {
           overnightLow,
           macro,
         );
+
+        // 基差調整:把指數座標的水位平移成期貨座標 (NQ/ES 圖可直接使用)。
+        // 抓不到期貨價就不調整,並誠實回報 (水位仍為指數座標)。
+        const basisInfo = await fetchFuturesBasis(instrument.futuresCode, result.lastPrice);
+        if (basisInfo) {
+          applyBasisToReport(report, basisInfo.basis);
+          warnings.push(
+            `${instrument.futuresCode} levels basis-adjusted by ${basisInfo.basis >= 0 ? "+" : ""}${basisInfo.basis.toFixed(1)} (futures ${basisInfo.futuresLast} vs index ${basisInfo.indexLast}).`,
+          );
+        } else {
+          warnings.push(
+            `${instrument.futuresCode}: futures quote unavailable; levels remain in ${instrument.indexSymbol} index terms (no basis adjustment).`,
+          );
+        }
+
         reports.push(report);
         reconciliations.push(...result.reconciliations.map((record) => ({ ...record, snapshot_timestamp: snapshotTimestamp })));
         contracts.push(...result.rawContracts.map((contract) => ({ ...contract, proxy: instrument.indexSymbol })));
