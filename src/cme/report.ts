@@ -1,9 +1,11 @@
-import { DailyReport, ExpiryGexSummary, OfficialProxyConfluence, PlaybookOutput, SessionMonitorState, TradingViewPayloads } from "../types";
+import { DailyReport, ExpiryGexSummary, GexDisplayCalibration, OfficialProxyConfluence, PlaybookOutput, SessionMonitorState, TradingViewPayloads } from "../types";
 import { analyzeMarketStructure } from "../utils/engine";
 import { black76Gamma, ResolvedOption } from "./cmeGex";
 import { CmeNqOptionContract } from "./types";
 
 export const NQ_FUTURES_MULTIPLIER = 20;
+export const NQ_COMPARABLE_NET_DIVISOR = 87;
+export const NQ_COMPARABLE_GROSS_DIVISOR = 175;
 
 export interface CmeImportWithContracts {
   id: string;
@@ -41,7 +43,7 @@ export function analyzeCmeResolved(
   confidence: "high" | "medium" | "low",
   macro: { VIX: number; DXY: number; US10Y: number },
 ): DailyReport {
-  return analyzeMarketStructure(
+  const report = analyzeMarketStructure(
     "NQ",
     `${underlying} (CME)`,
     `${tradeDate}T16:00:00-04:00`,
@@ -57,6 +59,36 @@ export function analyzeCmeResolved(
       calculationMode: "CME_BLACK_76",
     },
   );
+  return attachCmeGexDisplayCalibration(report);
+}
+
+export function attachCmeGexDisplayCalibration(report: DailyReport): DailyReport {
+  const rawNetGex = Math.round(report.total_net_gex ?? report.gamma.gex_strikes.reduce((acc, s) => acc + s.net_gex, 0));
+  const rawGrossGex = Math.round(report.gross_gex ?? report.gamma.gex_strikes.reduce((acc, s) => acc + Math.abs(s.net_gex), 0));
+  const calibration: GexDisplayCalibration = {
+    rawNetGex,
+    rawGrossGex,
+    pointNetGex: Math.round(rawNetGex / NQ_FUTURES_MULTIPLIER),
+    pointGrossGex: Math.round(rawGrossGex / NQ_FUTURES_MULTIPLIER),
+    comparableNetGex: Math.round(rawNetGex / NQ_COMPARABLE_NET_DIVISOR),
+    comparableGrossGex: Math.round(rawGrossGex / NQ_COMPARABLE_GROSS_DIVISOR),
+    contractMultiplier: NQ_FUTURES_MULTIPLIER,
+    comparableDivisor: NQ_COMPARABLE_NET_DIVISOR,
+    comparableNetDivisor: NQ_COMPARABLE_NET_DIVISOR,
+    comparableGrossDivisor: NQ_COMPARABLE_GROSS_DIVISOR,
+    mode: "COMPARABLE_SCALE",
+    benchmark: {
+      vendor: "MenthorQ text benchmark supplied by user",
+      tradeDate: "2026-07-07",
+      netGex: -2_880_000,
+      totalGex: 14_810_000,
+      putSupport: 29_000,
+      callResistance: 30_000,
+      hvl: 29_550,
+    },
+    note: "Comparable GEX is a transparent display calibration for side-by-side review. It is not MenthorQ's proprietary formula and raw CME Black-76 values are preserved.",
+  };
+  return { ...report, gex_display: calibration };
 }
 
 function gammaPivotFromGex(strikes: DailyReport["gamma"]["gex_strikes"]): number | null {
@@ -77,6 +109,8 @@ function summarizeExpiry(label: string, expiryDate: string, tradeDate: string, r
   const grossGex = gex.reduce((acc, s) => acc + Math.abs(s.net_gex), 0);
   const positiveGex = gex.filter((s) => s.net_gex > 0).reduce((acc, s) => acc + s.net_gex, 0);
   const negativeGex = gex.filter((s) => s.net_gex < 0).reduce((acc, s) => acc + s.net_gex, 0);
+  const comparableNetDivisor = report.gex_display?.comparableNetDivisor ?? NQ_COMPARABLE_NET_DIVISOR;
+  const comparableGrossDivisor = report.gex_display?.comparableGrossDivisor ?? NQ_COMPARABLE_GROSS_DIVISOR;
   return {
     label,
     expiryDate,
@@ -87,6 +121,12 @@ function summarizeExpiry(label: string, expiryDate: string, tradeDate: string, r
     gammaPivot: gammaPivotFromGex(gex),
     netGex,
     grossGex,
+    rawNetGex: netGex,
+    rawGrossGex: grossGex,
+    pointNetGex: Math.round(netGex / NQ_FUTURES_MULTIPLIER),
+    pointGrossGex: Math.round(grossGex / NQ_FUTURES_MULTIPLIER),
+    comparableNetGex: Math.round(netGex / comparableNetDivisor),
+    comparableGrossGex: Math.round(grossGex / comparableGrossDivisor),
     positiveGex,
     negativeGex,
     expiryStructureImpactPct: allGrossGex > 0 ? Math.round((netGex / allGrossGex) * 1000) / 10 : 0,

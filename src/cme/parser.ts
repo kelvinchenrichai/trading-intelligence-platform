@@ -17,11 +17,19 @@ import { promisify } from "util";
 import { CmeExpirySummary, CmeNqImportResult, CmeNqOptionContract, CmeOptionType } from "./types";
 
 const execFileAsync = promisify(execFile);
-export const CME_PARSER_VERSION = "cme-pg40-v0.1.0";
+export const CME_PARSER_VERSION = "cme-pg40-v0.2.0-full-expiry-resolver";
 
 type Word = { x: number; y: number; text: string; page: number };
 type PdfLine = { y: number; page: number; words: Word[]; text: string };
-type Context = { family: string; optionType: CmeOptionType; optionCode: string | null; monthLabel: string | null };
+type Context = {
+  /** Human CME section name, for example E-MINI NASDAQ 100 WEEKLY-2 or DMQ MID. */
+  family: string;
+  optionType: CmeOptionType;
+  optionCode: string | null;
+  monthLabel: string | null;
+  /** CALLS/PUTS section currently being parsed. ADDITIONAL sections mutate this per sub-code. */
+  parentSection: string | null;
+};
 
 const MONTHS: Record<string, number> = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
 
@@ -89,6 +97,33 @@ function thirdFriday(year: number, monthZeroBased: number): Date {
   return first;
 }
 
+function weekdayFromFamily(familyUpper: string): number | null {
+  if (/\bMON\b|MONDAY/.test(familyUpper)) return 1;
+  if (/\bTUE\b|TUESDAY/.test(familyUpper)) return 2;
+  if (/\bWED\b|WEDNESDAY|\bMID\b/.test(familyUpper)) return 3;
+  if (/\bTHU\b|\bTHUR\b|THURSDAY/.test(familyUpper)) return 4;
+  if (/\bFRI\b|FRIDAY/.test(familyUpper)) return 5;
+  return null;
+}
+
+function dailySeriesWeekOffset(familyUpper: string): number {
+  // CME PG40 lists daily Nasdaq option product codes in letter series.  The exact
+  // exchange calendar remains a specialized contract-calendar problem, so this
+  // transparent resolver maps the common Section 40 daily prefixes by observed
+  // week bucket and flags all results as estimated.
+  const code = familyUpper.match(/^([A-Z0-9]{2,4})\s+/)?.[1] || "";
+  if (/^D/.test(code)) return 0; // current listed week
+  if (/^Q/.test(code)) return 1; // following listed week
+  if (/^R/.test(code)) return 2; // two weeks out
+  return 0;
+}
+
+function addCalendarDays(from: Date, days: number): Date {
+  const d = new Date(from);
+  d.setUTCDate(d.getUTCDate() + days);
+  return d;
+}
+
 function inferExpiry(tradeDate: string, family: string, monthLabel: string | null): { expiryDate: string; precision: "estimated"; label: string } {
   const trade = new Date(`${tradeDate}T00:00:00Z`);
   const familyUpper = family.toUpperCase();
@@ -96,10 +131,11 @@ function inferExpiry(tradeDate: string, family: string, monthLabel: string | nul
   if (weeklyMatch) {
     return { expiryDate: isoDate(nthFridayFromTradeDate(tradeDate, Number(weeklyMatch[1]))), precision: "estimated", label: family };
   }
-  if (/\bMON\b|MONDAY/.test(familyUpper)) return { expiryDate: isoDate(nextWeekdayInclusive(trade, 1)), precision: "estimated", label: family };
-  if (/\bTUE\b|TUESDAY/.test(familyUpper)) return { expiryDate: isoDate(nextWeekdayInclusive(trade, 2)), precision: "estimated", label: family };
-  if (/\bWED\b|WEDNESDAY|MID/.test(familyUpper)) return { expiryDate: isoDate(nextWeekdayInclusive(trade, 3)), precision: "estimated", label: family };
-  if (/\bTHU\b|THURSDAY/.test(familyUpper)) return { expiryDate: isoDate(nextWeekdayInclusive(trade, 4)), precision: "estimated", label: family };
+  const weekday = weekdayFromFamily(familyUpper);
+  if (weekday !== null) {
+    const first = nextWeekdayInclusive(trade, weekday);
+    return { expiryDate: isoDate(addCalendarDays(first, dailySeriesWeekOffset(familyUpper) * 7)), precision: "estimated", label: family };
+  }
   if (monthLabel && /EOM|END OF MONTH/.test(familyUpper)) {
     const mon = MONTHS[monthLabel.slice(0, 3)];
     const year = 2000 + Number(monthLabel.slice(3));
@@ -175,14 +211,34 @@ function findFutureSettlement(lines: PdfLine[]): { contract: string; settlement:
 
 function detectContext(line: PdfLine, current: Context | null): Context | null {
   const text = line.text.toUpperCase();
-  if (/NASDAQ/.test(text) && !/RUSSELL|MICRO/.test(text) && /(CALLS|PUTS)/.test(text) && /(E-MINI|MINI NSDQ)/.test(text)) {
+  // Main and auxiliary Section 40 tables.  v0.1 only caught E-MINI WEEKLY
+  // headers, which missed ADDITIONAL NASDAQ daily/MID/THUR/WED/EOM sections
+  // and caused the dashboard to collapse the CME universe to a few Friday
+  // expirations.  Keep the matcher broad, but still exclude Russell/Micro rows
+  // and let parseRow reject non-NQ strike scales (< 10,000).
+  const startsWithContractMonth = /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}\b/.test(text.trim());
+  const isSectionHeader = !startsWithContractMonth && (
+    /^\s*EMINI NASD\s+(CALL|PUT)\s*$/.test(text) ||
+    /^(NASDAQ 100 WEEKLY-\d|E-MINI NASDAQ 100 WEEKLY-\d|ADDITIONAL NASDAQ|MINI NSDQ EOM)/.test(text)
+  );
+  if (isSectionHeader && /NASDAQ|NASD|NSDQ/.test(text) && !/RUSSELL|RTY|MICRO/.test(text) && /(CALLS|PUTS|\bCALL\b|\bPUT\b|EOM)/.test(text)) {
     const optionType: CmeOptionType = /PUTS/.test(text) ? "put" : "call";
-    const family = text.replace(/\s+/g, " ").replace(/\s+(CALLS|PUTS)$/, "").trim();
-    return { family, optionType, optionCode: current?.optionCode || null, monthLabel: null };
+    let family = text.replace(/\s+/g, " ").replace(/\s+(CALLS|PUTS)$/, "").replace(/\s+\b(CALL|PUT)\b.*$/, "").trim();
+    if (/ADDITIONAL NASDAQ/.test(text)) family = "ADDITIONAL NASDAQ";
+    if (/MINI NSDQ EOM\s+C\b/.test(text)) family = "MINI NSDQ EOM";
+    if (/MINI NSDQ EOM\s+P\b/.test(text)) family = "MINI NSDQ EOM";
+    return { family, optionType, optionCode: null, monthLabel: null, parentSection: text };
   }
   if (!current) return current;
-  const code = line.words.map((word) => word.text).join(" ").match(/\b([A-Z0-9]{2,4})\s+(CALL|PUT|MID|MON|TUE|WED|THU)\b/);
-  if (code && /^(Q|N)/.test(code[1])) return { ...current, optionCode: code[1] };
+  const joined = line.words.map((word) => word.text).join(" ").toUpperCase();
+  const code = joined.match(/^\s*([A-Z0-9]{2,4})\s+(CALL|PUT|MID|MON|TUE|WED|THUR|THU)\b/);
+  if (code && !/^(TOTAL|OPEN|HIGH|LOW|STRIKE)$/.test(code[1])) {
+    const descriptor = code[2] === "THUR" ? "THUR" : code[2];
+    return { ...current, family: `${code[1]} ${descriptor}`, optionCode: code[1], monthLabel: null };
+  }
+  if (/^\s*MINI NSDQ EOM\s+[CP]\b/.test(joined)) {
+    return { ...current, family: "MINI NSDQ EOM", optionCode: "EOM", monthLabel: null };
+  }
   const month = line.words.find((word) => word.x < 60 && /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}$/i.test(word.text))?.text;
   if (month) return { ...current, monthLabel: month.toUpperCase() };
   return current;
@@ -199,12 +255,19 @@ function parseRow(line: PdfLine, context: Context, tradeDate: string, underlying
   const oi = asNumber(line.words.find((word) => word.x >= 468 && word.x < 505)?.text);
   if (oi === null) return null;
   const inferred = inferExpiry(tradeDate, context.family, context.monthLabel);
+  const sectionType = /WEEKLY-\d/.test(context.family)
+    ? context.family.match(/WEEKLY-\d/)?.[0] || "WEEKLY"
+    : /EOM/.test(context.family)
+      ? "EOM"
+      : weekdayFromFamily(context.family.toUpperCase()) !== null
+        ? "DAILY"
+        : "MONTHLY";
   return {
     tradeDate,
     underlyingContract,
     optionFamily: context.family,
     optionCode: context.optionCode,
-    expiryLabel: `${context.monthLabel || "UNKNOWN"} · ${inferred.label}`,
+    expiryLabel: `${inferred.expiryDate} · ${sectionType} · ${context.monthLabel || "UNKNOWN"} · ${inferred.label}`,
     expiryDate: inferred.expiryDate,
     expiryPrecision: inferred.precision,
     optionType: context.optionType,
@@ -214,13 +277,23 @@ function parseRow(line: PdfLine, context: Context, tradeDate: string, underlying
     openInterest: Math.round(oi),
     volume: Math.round(volume),
     sourcePage: line.page,
-    rawRow: { text: line.text, page: line.page, xStrike: strikeWord.x, settlementWord: line.words.find((word) => word.x >= 290 && word.x < 350)?.text || null },
+    rawRow: {
+      text: line.text,
+      page: line.page,
+      xStrike: strikeWord.x,
+      settlementWord: line.words.find((word) => word.x >= 290 && word.x < 350)?.text || null,
+      sectionType,
+      optionCode: context.optionCode,
+      parentSection: context.parentSection,
+    },
   };
 }
 
 function summarize(contracts: CmeNqOptionContract[], futuresSettlement: number): CmeExpirySummary[] {
   const groups = new Map<string, CmeNqOptionContract[]>();
-  for (const contract of contracts) groups.set(contract.expiryLabel, [...(groups.get(contract.expiryLabel) || []), contract]);
+  // Group by actual resolved expiry date for audit summaries.  Multiple CME
+  // sections can share one expiry (for example weekly + EOM + contract month).
+  for (const contract of contracts) groups.set(contract.expiryDate, [...(groups.get(contract.expiryDate) || []), contract]);
   return [...groups.values()].map((group) => {
     const call = group.filter((row) => row.optionType === "call");
     const put = group.filter((row) => row.optionType === "put");
@@ -230,7 +303,7 @@ function summarize(contracts: CmeNqOptionContract[], futuresSettlement: number):
       return sum + sign * (row.delta ?? 0) * row.openInterest * 20 * futuresSettlement;
     }, 0);
     return {
-      expiryLabel: group[0].expiryLabel,
+      expiryLabel: Array.from(new Set(group.map((row) => row.expiryLabel))).slice(0, 4).join(" | "),
       expiryDate: group[0].expiryDate,
       expiryPrecision: group[0].expiryPrecision,
       optionFamily: group[0].optionFamily,

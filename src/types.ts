@@ -81,6 +81,36 @@ export interface ExpiryGexSummary {
   expiryStructureImpactPct: number;
   strikeCount: number;
   gexStrikes: GexStrikeData[];
+  rawNetGex?: number;
+  rawGrossGex?: number;
+  pointNetGex?: number;
+  pointGrossGex?: number;
+  comparableNetGex?: number;
+  comparableGrossGex?: number;
+}
+
+export interface GexDisplayCalibration {
+  rawNetGex: number;
+  rawGrossGex: number;
+  pointNetGex: number;
+  pointGrossGex: number;
+  comparableNetGex: number;
+  comparableGrossGex: number;
+  contractMultiplier: number;
+  comparableDivisor: number;
+  comparableNetDivisor?: number;
+  comparableGrossDivisor?: number;
+  mode: "RAW_CME" | "POINT_GEX" | "COMPARABLE_SCALE";
+  benchmark?: {
+    vendor: string;
+    tradeDate: string;
+    netGex: number;
+    totalGex: number;
+    putSupport: number;
+    callResistance: number;
+    hvl: number;
+  };
+  note: string;
 }
 
 export interface DataSourceStatusBlock {
@@ -224,6 +254,7 @@ export interface DailyReport {
   gross_gex?: number;
   total_net_gex?: number;
   top_abs_gex_strikes?: Array<{ strike: number; gex: number; rank: number }>;
+  gex_display?: GexDisplayCalibration;
 }
 
 export type SourceState = "ok" | "failed" | "not_configured" | "not_attempted";

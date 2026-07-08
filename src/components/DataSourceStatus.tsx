@@ -9,6 +9,16 @@ export const DataSourceStatus: React.FC<{ report: DailyReport; lang?: "zh" | "en
   if (!status) return null;
   const isCme = status.dataMode === "CME_PG40";
   const tone = isCme ? "text-[#2DD4A7] border-[#2DD4A7]/25 bg-[#2DD4A7]/10" : "text-[#F2A93B] border-[#F2A93B]/25 bg-[#F2A93B]/10";
+  const gex = report.gex_display;
+  const fmt = (n?: number) => {
+    if (typeof n !== "number") return "—";
+    const abs = Math.abs(n);
+    const sign = n >= 0 ? "+" : "-";
+    if (abs >= 1e9) return `${sign}${(abs / 1e9).toFixed(2)}B`;
+    if (abs >= 1e6) return `${sign}${(abs / 1e6).toFixed(2)}M`;
+    if (abs >= 1e3) return `${sign}${(abs / 1e3).toFixed(0)}K`;
+    return `${sign}${abs.toFixed(0)}`;
+  };
   return (
     <section className="glass-card p-5 border border-white/5">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -40,6 +50,22 @@ export const DataSourceStatus: React.FC<{ report: DailyReport; lang?: "zh" | "en
       </div>
 
       <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-3 text-xs">
+        {gex && (
+          <div className="rounded-lg border border-[#2DD4A7]/10 bg-[#171E24]/60 p-3 lg:col-span-2">
+            <div className="font-bold text-slate-300 mb-2">{isZh ? "GEX 顯示校準" : "GEX Display Calibration"}</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-2 font-mono">
+              <Tile label={isZh ? "Raw Net" : "Raw Net"} value={fmt(gex.rawNetGex)} />
+              <Tile label={isZh ? "Point Net ÷20" : "Point Net ÷20"} value={fmt(gex.pointNetGex)} />
+              <Tile label={isZh ? "Comparable Net" : "Comparable Net"} value={fmt(gex.comparableNetGex)} tone="good" />
+              <Tile label={isZh ? "Comparable Total" : "Comparable Total"} value={fmt(gex.comparableGrossGex)} tone="good" />
+            </div>
+            <p className="text-[11px] text-slate-500 mt-2 leading-relaxed">
+              {isZh
+                ? `Comparable 使用透明顯示校準：Net ÷${gex.comparableNetDivisor || gex.comparableDivisor}、Total/Gross ÷${gex.comparableGrossDivisor || gex.comparableDivisor}；只用於第三方尺度對照，不是 MenthorQ 私有公式。`
+                : `Comparable uses transparent display calibration: Net ÷${gex.comparableNetDivisor || gex.comparableDivisor}, Total/Gross ÷${gex.comparableGrossDivisor || gex.comparableDivisor}; it is not a proprietary MenthorQ formula.`}
+            </p>
+          </div>
+        )}
         <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3">
           <div className="flex items-center gap-2 text-slate-300 font-bold mb-1"><Radio className="w-3.5 h-3.5 text-indigo-400" />{isZh ? "盤中資料流" : "Session Flow"}</div>
           <p className="text-slate-400 leading-relaxed">{translateText(status.sessionFlow?.note || "Unavailable", lang)}</p>
