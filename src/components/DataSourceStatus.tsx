@@ -1,6 +1,7 @@
 import React from "react";
 import { AlertTriangle, Database, Radio, ShieldCheck } from "lucide-react";
 import { DailyReport } from "../types";
+import { translateText } from "../utils/displayText";
 
 export const DataSourceStatus: React.FC<{ report: DailyReport; lang?: "zh" | "en" }> = ({ report, lang = "zh" }) => {
   const isZh = lang === "zh";
@@ -22,31 +23,31 @@ export const DataSourceStatus: React.FC<{ report: DailyReport; lang?: "zh" | "en
         </div>
         <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-bold border ${tone}`}>
           {isCme ? <ShieldCheck className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
-          {status.currentModel}
+          {translateText(status.currentModel, lang)}
         </span>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-3 mt-4 text-xs font-mono">
-        <Tile label={isZh ? "Dashboard Date" : "Dashboard Date"} value={status.dashboardDate || "—"} />
-        <Tile label={isZh ? "Primary Source" : "Primary Source"} value={status.primarySource} />
-        <Tile label={isZh ? "Data Mode" : "Data Mode"} value={status.dataMode} />
-        <Tile label={isZh ? "CME Trade Date" : "CME Trade Date"} value={status.cmeTradeDate || "—"} tone={isCme ? "good" : "muted"} />
-        <Tile label={isZh ? "Underlying" : "Underlying"} value={status.cmeUnderlying || status.proxy?.instrument || "—"} />
-        <Tile label={isZh ? "Futures Settlement" : "Futures Settlement"} value={status.cmeFuturesSettlement ? String(status.cmeFuturesSettlement) : "—"} />
-        <Tile label={isZh ? "Contracts Parsed" : "Contracts Parsed"} value={status.cmeContractsParsed?.toLocaleString() || "—"} />
-        <Tile label={isZh ? "Expiry Groups" : "Expiry Groups"} value={status.cmeExpiryGroups?.toString() || "—"} />
-        <Tile label={isZh ? "Import Timestamp" : "Import Timestamp"} value={status.cmeImportTimestamp || "—"} />
+        <Tile label={isZh ? "Dashboard 日期" : "Dashboard Date"} value={status.dashboardDate || "—"} />
+        <Tile label={isZh ? "主要資料來源" : "Primary Source"} value={translateText(status.primarySource, lang)} />
+        <Tile label={isZh ? "資料模式" : "Data Mode"} value={translateText(status.dataMode, lang)} />
+        <Tile label={isZh ? "CME 交易日" : "CME Trade Date"} value={status.cmeTradeDate || "—"} tone={isCme ? "good" : "muted"} />
+        <Tile label={isZh ? "標的合約" : "Underlying"} value={status.cmeUnderlying || status.proxy?.instrument || "—"} />
+        <Tile label={isZh ? "期貨結算價" : "Futures Settlement"} value={status.cmeFuturesSettlement ? String(status.cmeFuturesSettlement) : "—"} />
+        <Tile label={isZh ? "解析合約數" : "Contracts Parsed"} value={status.cmeContractsParsed?.toLocaleString() || "—"} />
+        <Tile label={isZh ? "到期日群組" : "Expiry Groups"} value={status.cmeExpiryGroups?.toString() || "—"} />
+        <Tile label={isZh ? "匯入時間" : "Import Timestamp"} value={status.cmeImportTimestamp || "—"} />
       </div>
 
       <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-3 text-xs">
         <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3">
-          <div className="flex items-center gap-2 text-slate-300 font-bold mb-1"><Radio className="w-3.5 h-3.5 text-indigo-400" />Session Flow</div>
-          <p className="text-slate-400 leading-relaxed">{status.sessionFlow?.note || "Unavailable"}</p>
+          <div className="flex items-center gap-2 text-slate-300 font-bold mb-1"><Radio className="w-3.5 h-3.5 text-indigo-400" />{isZh ? "盤中資料流" : "Session Flow"}</div>
+          <p className="text-slate-400 leading-relaxed">{translateText(status.sessionFlow?.note || "Unavailable", lang)}</p>
         </div>
         <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3">
-          <div className="font-bold text-slate-300 mb-1">{isZh ? "Fallback / Warnings" : "Fallback / Warnings"}</div>
-          <p className="text-slate-400 leading-relaxed">{status.fallbackUsed ? status.fallbackReason : (isZh ? "未使用 fallback；目前為 CME 官方 EOD 盤前地圖。" : "No fallback used; current model is CME official EOD map.")}</p>
-          {status.sourceWarnings?.length > 0 && <ul className="mt-2 space-y-1 text-[11px] text-amber-200 list-disc list-inside">{status.sourceWarnings.slice(0, 4).map((w, i) => <li key={i}>{w}</li>)}</ul>}
+          <div className="font-bold text-slate-300 mb-1">{isZh ? "備援 / 警示" : "Fallback / Warnings"}</div>
+          <p className="text-slate-400 leading-relaxed">{status.fallbackUsed ? translateText(status.fallbackReason, lang) : (isZh ? "未使用 fallback；目前為 CME 官方 EOD 盤前地圖。" : "No fallback used; current model is CME official EOD map.")}</p>
+          {status.sourceWarnings?.length > 0 && <ul className="mt-2 space-y-1 text-[11px] text-amber-200 list-disc list-inside">{status.sourceWarnings.slice(0, 4).map((w, i) => <li key={i}>{translateText(w, lang)}</li>)}</ul>}
         </div>
       </div>
     </section>

@@ -2,6 +2,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Database, RefreshCw, Search, ShieldCheck } from "lucide-react";
 import { DailyReport, DataReconciliation } from "../types";
+import { translateText } from "../utils/displayText";
 
 interface AuditPanelProps {
   proxy: string;
@@ -74,23 +75,23 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ proxy, date, lang = "zh"
                 : "Single official source: CME PG40. There is no second NQ futures options source for contract-level OI reconciliation; NDX proxy is confluence only."}
             </p>
           </div>
-          <span className="text-[10px] font-mono text-[#2DD4A7] bg-[#2DD4A7]/10 border border-[#2DD4A7]/20 rounded-full px-3 py-1">CME Official EOD</span>
+          <span className="text-[10px] font-mono text-[#2DD4A7] bg-[#2DD4A7]/10 border border-[#2DD4A7]/20 rounded-full px-3 py-1">{isZh ? "CME 官方 EOD" : "CME Official EOD"}</span>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs font-mono">
-          <Metric label="CME trade date" value={cmeAudit.tradeDate} note="Dashboard date matched" tone="good" />
-          <Metric label="Underlying contract" value={cmeAudit.underlyingContract} note="CME futures options" tone="neutral" />
-          <Metric label="Futures settlement" value={String(cmeAudit.futuresSettlement)} note="Black-76 forward" tone="neutral" />
-          <Metric label="Parsed contracts" value={cmeAudit.parsedContractsCount.toLocaleString()} note="PG40 rows" tone="neutral" />
-          <Metric label="Expiry groups" value={String(cmeAudit.expiryGroupsCount)} note="Multi-expiration" tone="neutral" />
-          <Metric label="Total Call OI" value={cmeAudit.totalCallOi.toLocaleString()} note="Official OI" tone="neutral" />
-          <Metric label="Total Put OI" value={cmeAudit.totalPutOi.toLocaleString()} note="Official OI" tone="neutral" />
-          <Metric label="Total Volume" value={cmeAudit.totalVolume.toLocaleString()} note="CME volume" tone="neutral" />
+          <Metric label={isZh ? "CME 交易日" : "CME trade date"} value={cmeAudit.tradeDate} note={isZh ? "已匹配 Dashboard 日期" : "Dashboard date matched"} tone="good" />
+          <Metric label={isZh ? "標的合約" : "Underlying contract"} value={cmeAudit.underlyingContract} note="CME futures options" tone="neutral" />
+          <Metric label={isZh ? "期貨結算價" : "Futures settlement"} value={String(cmeAudit.futuresSettlement)} note="Black-76 forward" tone="neutral" />
+          <Metric label={isZh ? "解析合約數" : "Parsed contracts"} value={cmeAudit.parsedContractsCount.toLocaleString()} note="PG40 rows" tone="neutral" />
+          <Metric label={isZh ? "到期日群組" : "Expiry groups"} value={String(cmeAudit.expiryGroupsCount)} note="Multi-expiration" tone="neutral" />
+          <Metric label={isZh ? "Call 總 OI" : "Total Call OI"} value={cmeAudit.totalCallOi.toLocaleString()} note={isZh ? "官方 OI" : "Official OI"} tone="neutral" />
+          <Metric label={isZh ? "Put 總 OI" : "Total Put OI"} value={cmeAudit.totalPutOi.toLocaleString()} note={isZh ? "官方 OI" : "Official OI"} tone="neutral" />
+          <Metric label={isZh ? "總成交量" : "Total Volume"} value={cmeAudit.totalVolume.toLocaleString()} note="CME volume" tone="neutral" />
         </div>
         <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-3 text-xs font-mono">
-          <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3"><span className="block text-[9px] uppercase text-slate-500 mb-1">PDF hash</span><span className="text-slate-300 break-all">{cmeAudit.pdfHash || "—"}</span></div>
-          <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3"><span className="block text-[9px] uppercase text-slate-500 mb-1">Import timestamp / Parser</span><span className="text-slate-300 break-all">{cmeAudit.importTimestamp || "—"} · {cmeAudit.parserVersion || "—"}</span></div>
+          <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3"><span className="block text-[9px] uppercase text-slate-500 mb-1">{isZh ? "PDF 雜湊" : "PDF hash"}</span><span className="text-slate-300 break-all">{cmeAudit.pdfHash || "—"}</span></div>
+          <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3"><span className="block text-[9px] uppercase text-slate-500 mb-1">{isZh ? "匯入時間 / 解析器" : "Import timestamp / Parser"}</span><span className="text-slate-300 break-all">{cmeAudit.importTimestamp || "—"} · {cmeAudit.parserVersion || "—"}</span></div>
         </div>
-        {cmeAudit.warnings?.length > 0 && <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-[11px] text-amber-100 space-y-1">{cmeAudit.warnings.map((w, i) => <div key={i}>• {w}</div>)}</div>}
+        {cmeAudit.warnings?.length > 0 && <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-[11px] text-amber-100 space-y-1">{cmeAudit.warnings.map((w, i) => <div key={i}>• {translateText(w, lang)}</div>)}</div>}
       </div>
     );
   }

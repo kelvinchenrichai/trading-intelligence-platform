@@ -45,6 +45,7 @@ import { SessionMonitor } from "./components/SessionMonitor";
 import { TradingViewExport } from "./components/TradingViewExport";
 import { useAuth } from "./auth";
 import { translations } from "./utils/translations";
+import { translateText } from "./utils/displayText";
 
 export default function App() {
   const [instruments, setInstruments] = useState<Instrument[]>([]);
@@ -159,12 +160,12 @@ export default function App() {
       const res = await fetch("/api/trigger-scrape", { method: "POST" });
       const result = await res.json();
       if (!res.ok || !result.success) {
-        const detail = result.warnings?.join(" ") || result.error || (lang === "zh" ? "刷新失敗。" : "Refresh failed.");
+        const detail = result.warnings?.map((w) => translateText(w, lang)).join(" ") || translateText(result.error, lang) || (lang === "zh" ? "刷新失敗。" : "Refresh failed.");
         setDataMessage({ type: "error", text: detail });
         await loadStatus();
         return;
       }
-      const warningText = result.warnings?.length ? ` ${result.warnings.join(" ")}` : "";
+      const warningText = result.warnings?.length ? ` ${result.warnings.map((w) => translateText(w, lang)).join(" ")}` : "";
       const zhMsg = `已完成 EOD 資料快照：${result.date}。${result.persisted ? "已保存至資料庫。" : "警告：目前未保存至資料庫。"}${warningText}`;
       const enMsg = `EOD snapshot completed: ${result.date}. ${result.persisted ? "Saved to database." : "Warning: not persisted."}${warningText}`;
       setScrapingSuccessMessage(lang === "zh" ? zhMsg : enMsg);
@@ -327,7 +328,7 @@ export default function App() {
         {appStatus && (appStatus.persistence !== "durable" || appStatus.warnings.length > 0) && (
           <div className="bg-amber-500/10 border border-amber-500/25 text-amber-100 px-4 py-3 rounded-lg text-xs leading-relaxed">
             <strong>{lang === "zh" ? "資料狀態：" : "Data status: "}</strong>
-            {appStatus.persistence === "memory_only" ? (lang === "zh" ? "尚未連接 Supabase；任何快照在伺服器重啟後都會消失。" : "Supabase is not connected; snapshots will be lost after a restart.") : appStatus.warnings.slice(0, 2).join(" ")}
+            {appStatus.persistence === "memory_only" ? (lang === "zh" ? "尚未連接 Supabase；任何快照在伺服器重啟後都會消失。" : "Supabase is not connected; snapshots will be lost after a restart.") : appStatus.warnings.slice(0, 2).map((w) => translateText(w, lang)).join(" ")}
           </div>
         )}
 

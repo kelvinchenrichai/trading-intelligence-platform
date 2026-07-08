@@ -66,6 +66,28 @@ function tradingViewAuthorized(payload: any, req: express.Request): boolean {
   return payload?.secret === expected || req.get("x-tv-secret") === expected;
 }
 
+
+function defaultTradingViewSessionState(reason?: string) {
+  return {
+    lastEvent: null,
+    gammaFlipTouched: false,
+    gammaFlipReclaimed: false,
+    callWallTouched: false,
+    callWallBreakoutConfirmed: false,
+    putWallTouched: false,
+    putWallBreakdownConfirmed: false,
+    wallFlipped: null,
+    currentSessionRegime: "No Edge",
+    explanation: reason || "No TradingView webhook events received for this model date yet.",
+    updatedAt: null,
+  };
+}
+
+function isMissingTradingViewTableError(error: any): boolean {
+  const message = String(error?.message || error || "").toLowerCase();
+  return message.includes("tradingview_events") && (message.includes("could not find") || message.includes("schema cache") || message.includes("does not exist"));
+}
+
 async function startServer() {
   const app = express();
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1, fields: 4 }, fileFilter: (_req, file, callback) => {
@@ -154,10 +176,23 @@ async function startServer() {
     const underlying = typeof req.query.underlying === "string" ? req.query.underlying : undefined;
     if (!modelDate) return res.status(400).json({ error: "Missing modelDate parameter", code: "BAD_REQUEST" });
     const store = SupabaseStore.fromEnvironment();
-    if (!store) return res.status(503).json({ error: "Supabase is required for TradingView session state.", code: "TV_STORE_NOT_CONFIGURED" });
+    if (!store) {
+      return res.json({
+        ...defaultTradingViewSessionState("Session Flow unavailable — currently using CME EOD OI baseline until TradingView webhook events arrive."),
+        warning: "Supabase is not connected; TradingView session events cannot be loaded yet.",
+        code: "TV_STORE_NOT_CONFIGURED",
+      });
+    }
     try {
       return res.json(await store.getTradingViewSessionState(modelDate, underlying));
     } catch (error: any) {
+      if (isMissingTradingViewTableError(error)) {
+        return res.json({
+          ...defaultTradingViewSessionState("No TradingView webhook events received for this model date yet."),
+          warning: "Supabase tradingview_events table is missing. Run supabase/003_tradingview_events.sql before using webhook persistence.",
+          code: "TV_EVENTS_TABLE_MISSING",
+        });
+      }
       return res.status(503).json({ error: error?.message || "Unable to load TradingView session state", code: "TV_STORE_ERROR" });
     }
   });

@@ -98,13 +98,13 @@ export const GexChart: React.FC<GexChartProps> = ({ gexData, spotPrice, flipLeve
   return (
     <div id="gex-chart-container" className="glass-card p-6">
       <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
-        <div><h3 className="font-display font-bold text-sm text-white uppercase tracking-wider">{isZh ? "📊 GEX Profile / Full Chain" : "📊 GEX Profile / Full Chain"}</h3><p className="text-xs text-slate-400 mt-1 leading-relaxed max-w-3xl">{isZh ? "Trade View 預設只看 Spot ±1000；Full Chain 固定高度且內部滾動，不拉爆頁面。" : "Trade View shows Spot ±1000 by default; Full Chain uses internal scrolling."}</p></div>
+        <div><h3 className="font-display font-bold text-sm text-white uppercase tracking-wider">{isZh ? "📊 GEX Profile / 完整鏈" : "📊 GEX Profile / Full Chain"}</h3><p className="text-xs text-slate-400 mt-1 leading-relaxed max-w-3xl">{isZh ? "Trade View 預設只看 Spot ±1000；Full Chain 固定高度且內部滾動，不會把整個頁面拉長。" : "Trade View shows Spot ±1000 by default; Full Chain uses internal scrolling."}</p></div>
         <div className="flex flex-wrap gap-2 text-xs">
-          {(["trade", "top", "full"] as ViewMode[]).map((m) => <button key={m} onClick={() => setView(m)} className={`px-3 py-1.5 rounded border ${view === m ? "bg-[#2DD4A7] text-black border-[#2DD4A7]" : "bg-[#12161A] text-slate-400 border-white/5 hover:text-white"}`}>{m === "trade" ? "Trade View" : m === "top" ? "Top GEX View" : "Full Chain View"}</button>)}
+          {(["trade", "top", "full"] as ViewMode[]).map((m) => <button key={m} onClick={() => setView(m)} className={`px-3 py-1.5 rounded border ${view === m ? "bg-[#2DD4A7] text-black border-[#2DD4A7]" : "bg-[#12161A] text-slate-400 border-white/5 hover:text-white"}`}>{m === "trade" ? (isZh ? "交易視圖" : "Trade View") : m === "top" ? (isZh ? "Top GEX 視圖" : "Top GEX View") : (isZh ? "完整鏈視圖" : "Full Chain View")}</button>)}
         </div>
       </div>
-      {view === "full" && <div className="flex flex-wrap items-center gap-2 mb-4 text-[11px]"><span className="text-slate-400 mr-1">Filter:</span>{(["all", "oi", "top50", "spot500", "spot1000", "spot1500"] as FilterMode[]).map((f) => <button key={f} onClick={() => setFilter(f)} className={`px-2.5 py-1 rounded border ${filter === f ? "bg-indigo-500 text-white border-indigo-500" : "bg-[#12161A] text-slate-400 border-white/5"}`}>{f === "all" ? "Show All" : f === "oi" ? "OI > 0" : f === "top50" ? "Top 50 abs GEX" : f.replace("spot", "Spot ±")}</button>)}</div>}
-      {view === "full" && <div className="flex flex-wrap gap-2 mb-4 text-[11px]"><span className="text-slate-400 mr-1">Jump:</span>{(["spot", "flip", "call", "put", "topgex", "top", "bottom"] as const).map((j) => <button key={j} onClick={() => jumpTo(j)} className="px-2.5 py-1 rounded border border-white/5 bg-[#12161A] text-slate-300 hover:text-white">{j === "topgex" ? "Top GEX" : j[0].toUpperCase()+j.slice(1)}</button>)}</div>}
+      {view === "full" && <div className="flex flex-wrap items-center gap-2 mb-4 text-[11px]"><span className="text-slate-400 mr-1">{isZh ? "篩選：" : "Filter:"}</span>{(["all", "oi", "top50", "spot500", "spot1000", "spot1500"] as FilterMode[]).map((f) => <button key={f} onClick={() => setFilter(f)} className={`px-2.5 py-1 rounded border ${filter === f ? "bg-indigo-500 text-white border-indigo-500" : "bg-[#12161A] text-slate-400 border-white/5"}`}>{f === "all" ? (isZh ? "全部" : "Show All") : f === "oi" ? "OI > 0" : f === "top50" ? (isZh ? "前 50 大 abs GEX" : "Top 50 abs GEX") : f.replace("spot", "Spot ±")}</button>)}</div>}
+      {view === "full" && <div className="flex flex-wrap gap-2 mb-4 text-[11px]"><span className="text-slate-400 mr-1">{isZh ? "跳轉：" : "Jump:"}</span>{(["spot", "flip", "call", "put", "topgex", "top", "bottom"] as const).map((j) => <button key={j} onClick={() => jumpTo(j)} className="px-2.5 py-1 rounded border border-white/5 bg-[#12161A] text-slate-300 hover:text-white">{j === "topgex" ? "Top GEX" : isZh ? ({ spot: "Spot", flip: "Flip", call: "Call Wall", put: "Put Wall", top: "頂部", bottom: "底部" } as Record<string, string>)[j] : j[0].toUpperCase()+j.slice(1)}</button>)}</div>}
 
       <div ref={scrollRef} className="w-full font-mono text-[10px] select-none rounded-lg border border-white/5 bg-[#0F1419]/40" style={{ height: frameHeight, overflowY: view === "full" ? "auto" : "hidden" }}>
         <div style={{ height: chartHeight }}>
@@ -129,10 +129,10 @@ export const GexChart: React.FC<GexChartProps> = ({ gexData, spotPrice, flipLeve
         <Metric label="Call Wall" value={resolvedCallWall ?? "N/A"} cls="text-[#EF4444]" />
         <Metric label="Put Wall" value={resolvedPutWall ?? "N/A"} cls="text-[#22C55E]" />
         <Metric label="Gamma Flip" value={flipLevel} cls="text-[#F2A93B]" />
-        <Metric label="Total Net GEX" value={fmt(totalNet)} cls={totalNet >= 0 ? "text-[#22C55E]" : "text-[#EF4444]"} />
-        <Metric label="Total Gross GEX" value={fmt(totalGross)} cls="text-slate-200" />
-        <Metric label="Total Strikes" value={sorted.length} cls="text-slate-200" />
-        <Metric label="Visible" value={visible.length} cls="text-slate-200" />
+        <Metric label={isZh ? "總 Net GEX" : "Total Net GEX"} value={fmt(totalNet)} cls={totalNet >= 0 ? "text-[#22C55E]" : "text-[#EF4444]"} />
+        <Metric label={isZh ? "總 Gross GEX" : "Total Gross GEX"} value={fmt(totalGross)} cls="text-slate-200" />
+        <Metric label={isZh ? "總 strikes" : "Total Strikes"} value={sorted.length} cls="text-slate-200" />
+        <Metric label={isZh ? "目前顯示" : "Visible"} value={visible.length} cls="text-slate-200" />
       </div>
     </div>
   );
