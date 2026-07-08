@@ -71,8 +71,8 @@ export interface DailyReport {
   gamma: {
     status: "positive" | "negative";
     flip_level: number;
-    call_walls: Array<{ strike: number; rank: number; gex: number }>;
-    put_walls: Array<{ strike: number; rank: number; gex: number }>;
+    call_walls: Array<{ strike: number; rank: number; gex: number; dist_pts?: number; confluence?: "confluent" | "split" }>;
+    put_walls: Array<{ strike: number; rank: number; gex: number; dist_pts?: number; confluence?: "confluent" | "split" }>;
     max_pain: number;
     gex_strikes: GexStrikeData[];
   };
@@ -88,6 +88,10 @@ export interface DailyReport {
     quadrant: "range_bound" | "range_at_edge" | "trending" | "chop_whipsaw";
     label: string;
     rationale: string;
+    /** 信念度:規則加總得出 (參考 GEXmon 的 conviction) */
+    conviction?: "high" | "medium" | "low";
+    /** 規則籤條:每條判定規則與加減分,攤開給使用者看,提升透明度 */
+    signals?: Array<{ text: string; weight: number }>;
   };
   technicals: {
     overnight_high: number;

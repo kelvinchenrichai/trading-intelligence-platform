@@ -171,6 +171,17 @@ export const ReportCard: React.FC<ReportCardProps> = ({ report, lang = "zh" }) =
                   <span className={`inline-block px-2 py-0.5 text-xs rounded-full font-sans font-medium uppercase ${colors.bg} ${colors.text}`}>
                     {regime.quadrant.replace("_", " ")}
                   </span>
+                  {regime.conviction && (
+                    <span className={`inline-block px-2 py-0.5 text-[10px] rounded-full font-mono font-bold uppercase border ${
+                      regime.conviction === "high"
+                        ? "bg-[#2DD4A7]/10 text-[#2DD4A7] border-[#2DD4A7]/30"
+                        : regime.conviction === "medium"
+                        ? "bg-[#F2A93B]/10 text-[#F2A93B] border-[#F2A93B]/30"
+                        : "bg-slate-500/10 text-slate-400 border-slate-500/30"
+                    }`}>
+                      {regime.conviction === "high" ? (lang === "zh" ? "高信念" : "HIGH") : regime.conviction === "medium" ? (lang === "zh" ? "中信念" : "MED") : (lang === "zh" ? "低信念" : "LOW")}
+                    </span>
+                  )}
                 </h3>
               </div>
             </div>
@@ -191,6 +202,27 @@ export const ReportCard: React.FC<ReportCardProps> = ({ report, lang = "zh" }) =
             <p className="text-sm text-slate-300 leading-relaxed bg-[#191F25] border-l-2 border-[#2DD4A7] p-4 rounded-r-lg font-sans">
               {getTranslatedRationale()}
             </p>
+
+            {/* 判定規則籤條 (透明化 regime 判定，參考 GEXmon) */}
+            {regime.signals && regime.signals.length > 0 && (
+              <div className="mt-3 flex flex-wrap gap-2">
+                {regime.signals.map((sig, i) => {
+                  const pos = sig.weight > 0;
+                  return (
+                    <span
+                      key={i}
+                      className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-mono border ${
+                        pos
+                          ? "bg-[#2DD4A7]/10 text-[#2DD4A7] border-[#2DD4A7]/20"
+                          : "bg-[#F2545B]/10 text-[#F2545B] border-[#F2545B]/20"
+                      }`}
+                    >
+                      {sig.text} <span className="font-bold">({pos ? "+" : ""}{sig.weight})</span>
+                    </span>
+                  );
+                })}
+              </div>
+            )}
           </div>
         </div>
 
@@ -335,7 +367,14 @@ export const ReportCard: React.FC<ReportCardProps> = ({ report, lang = "zh" }) =
                 <div className="w-2.5 h-2.5 rounded-sm bg-[#2DD4A7] animate-pulse" />
                 <span className="text-emerald-300 font-semibold">{t.majorCallWall}</span>
               </div>
-              <span className="text-[#2DD4A7] glow-pos font-extrabold">{gamma.call_walls[0]?.strike}</span>
+              <span className="text-[#2DD4A7] glow-pos font-extrabold">
+                {gamma.call_walls[0]?.strike}
+                {typeof gamma.call_walls[0]?.dist_pts === "number" && (
+                  <span className="text-[9px] text-slate-500 font-normal ml-1.5">
+                    {gamma.call_walls[0].dist_pts >= 0 ? "+" : ""}{gamma.call_walls[0].dist_pts} {lang === "zh" ? "點" : "pts"}
+                  </span>
+                )}
+              </span>
             </div>
 
             {/* Gamma Flip */}
@@ -353,7 +392,14 @@ export const ReportCard: React.FC<ReportCardProps> = ({ report, lang = "zh" }) =
                 <div className="w-2.5 h-2.5 rounded-sm bg-[#F2545B] animate-pulse" />
                 <span className="text-[#F2545B] font-semibold">{t.majorPutWall}</span>
               </div>
-              <span className="text-[#F2545B] glow-neg font-extrabold">{gamma.put_walls[0]?.strike}</span>
+              <span className="text-[#F2545B] glow-neg font-extrabold">
+                {gamma.put_walls[0]?.strike}
+                {typeof gamma.put_walls[0]?.dist_pts === "number" && (
+                  <span className="text-[9px] text-slate-500 font-normal ml-1.5">
+                    {gamma.put_walls[0].dist_pts >= 0 ? "+" : ""}{gamma.put_walls[0].dist_pts} {lang === "zh" ? "點" : "pts"}
+                  </span>
+                )}
+              </span>
             </div>
 
             {/* Put Wall 2 */}

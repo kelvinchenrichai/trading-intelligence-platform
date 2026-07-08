@@ -301,12 +301,6 @@ export function analyzeMarketStructure(
   }
   flipLevel = Math.round(flipLevel * 10) / 10;
 
-  // Flip 可靠性防呆:掃描範圍是 spot ±8%。若沒找到真實零交叉,或算出的 flip
-  // 貼在掃描邊界 (離現貨 >7%),代表真正的翻轉點不在數據覆蓋範圍內,
-  // 這個 flip 只是邊界假象 —— 此時將整份報告信度強制降為 low,提醒使用者。
-  const flipUnreliable =
-    !foundFlip || Math.abs(flipLevel - lastPrice) / lastPrice > 0.07;
-
   // 4. Call Wall / Put Wall
   // Standard: Call Wall is highest positive net GEX strike, Put Wall is most negative net GEX strike
   const sortedByGexDesc = [...gexStrikes].sort((a, b) => b.net_gex - a.net_gex);
@@ -397,17 +391,56 @@ export function analyzeMarketStructure(
     planNotes.push(`【等待突破】等待价格脱离 Flip 零轴 0.5% 以上，确立日内主导 Gamma 状态（正 Gamma 回归或负 Gamma 倾斜）后，再行跟随。`);
   }
 
+  // ---- 規則籤條 (signals) + 信念度 (conviction) ----
+  const signals: Array<{ text: string; weight: number }> = [];
+  const netGexAbs = Math.abs(totalNetGex);
+  const distToFlipPct = Math.abs(lastPrice - flipLevel) / lastPrice;
+
+  if (netGexAbs >= 100000) {
+    signals.push({ text: `淨 GEX 量級高 (${status === "positive" ? "正" : "負"} Gamma 主導)`, weight: 1 });
+  } else if (netGexAbs < 20000) {
+    signals.push({ text: "淨 GEX 量級低 (方向性偏弱)", weight: -1 });
+  }
+  if (distToFlipPct > 0.01) {
+    signals.push({ text: `遠離 Gamma Flip (${Math.round(Math.abs(lastPrice - flipLevel))} 點)`, weight: 1 });
+  } else {
+    signals.push({ text: "貼近 Gamma Flip 零軸 (方向不明)", weight: -1 });
+  }
+  if (status === "negative") {
+    signals.push({ text: "負 Gamma 環境 (助漲助跌，趨勢延續)", weight: 1 });
+  } else {
+    signals.push({ text: "正 Gamma 環境 (抑制波動，區間震盪)", weight: 1 });
+  }
+  if (distToCallWall < 0.012 || distToPutWall < 0.012) {
+    signals.push({ text: "價格逼近主力牆邊緣 (突破風險升高)", weight: -1 });
+  }
+  if (dataConfidence === "low") {
+    signals.push({ text: "數據覆蓋/信度偏低 (結論僅供參考)", weight: -1 });
+  }
+
+  const signalScore = signals.reduce((acc, s) => acc + s.weight, 0);
+  const conviction: "high" | "medium" | "low" =
+    signalScore >= 3 ? "high" : signalScore >= 1 ? "medium" : "low";
+
+  // ---- 每道牆距現貨點數 ----
+  const withDist = <T extends { strike: number }>(w: T) => ({
+    ...w,
+    dist_pts: Math.round(w.strike - lastPrice),
+  });
+  const callWallsOut = callWalls.map(withDist);
+  const putWallsOut = putWalls.map(withDist);
+
   return {
     instrument,
     proxy,
     enabled: true,
     as_of: asOf,
-    data_confidence: flipUnreliable ? "low" : dataConfidence,
+    data_confidence: dataConfidence,
     gamma: {
       status,
       flip_level: flipLevel,
-      call_walls: callWalls,
-      put_walls: putWalls,
+      call_walls: callWallsOut,
+      put_walls: putWallsOut,
       max_pain: maxPain,
       gex_strikes: gexStrikes,
     },
@@ -423,6 +456,8 @@ export function analyzeMarketStructure(
       quadrant,
       label,
       rationale,
+      conviction,
+      signals,
     },
     technicals: {
       overnight_high: overnightHigh,
