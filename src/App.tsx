@@ -36,6 +36,8 @@ import { SidebarNav, BottomNav } from "./components/PageNav";
 import { CmeDownloadLinks } from "./components/CmeDownloadLinks";
 import { AuthButton } from "./components/AuthButton";
 import { LoginPage } from "./components/LoginPage";
+import { UpdateStatus } from "./components/UpdateStatus";
+import { WallComparison } from "./components/WallComparison";
 import { useAuth } from "./auth";
 import { translations } from "./utils/translations";
 
@@ -327,6 +329,14 @@ export default function App() {
         {/* ===== DASHBOARD PAGE ===== */}
         {activePage === "dashboard" && (
         <>
+        {/* Update status: 上次更新時間 / 今日是否已更新 */}
+        <div className="glass-card px-4 py-2.5 mb-2">
+          <UpdateStatus
+            lang={lang}
+            timestamp={appStatus?.latestSnapshotTimestamp}
+            snapshotDate={appStatus?.latestSnapshotDate}
+          />
+        </div>
         {/* 2.1 Tab Bar and Layout Controllers */}
         <div className="flex flex-wrap items-center justify-between gap-4 border-b border-white/5 pb-4">
           
@@ -568,6 +578,18 @@ export default function App() {
               instrument={viewMode === "parallel" ? "NQ" : activeInst}
               lang={lang}
               tier="owner"
+            />
+            {/* 三方水位對照表:手動輸入 MenthorQ/gexmon 與系統對照 */}
+            <WallComparison
+              lang={lang}
+              instrument={viewMode === "parallel" ? "NQ" : activeInst}
+              date={activeDate || (appStatus?.latestSnapshotDate ?? "")}
+              system={report ? {
+                callWall: report.gamma?.call_walls?.[0]?.strike,
+                putWall: report.gamma?.put_walls?.[0]?.strike,
+                flip: report.gamma?.flip_level,
+                spot: report.price?.last,
+              } : undefined}
             />
           </div>
         )}

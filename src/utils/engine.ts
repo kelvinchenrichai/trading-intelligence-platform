@@ -354,41 +354,41 @@ export function analyzeMarketStructure(
     if (distToCallWall < 0.012 || distToPutWall < 0.012) {
       quadrant = "range_at_edge";
       label = "盤整·邊界風險";
-      rationale = `目前处于正 Gamma 区间 (${totalNetGex > 100000 ? "极强" : "温和"}对冲压制), 但价格已逼近${distToCallWall < distToPutWall ? ` Call Wall (主力强阻力: ${callWalls[0].strike})` : ` Put Wall (主力强支撑: ${putWalls[0].strike})`} 边缘。大户对冲盘整将转为防守, 注意一旦突破可能引发剧烈的对冲清算，波动率有放大风险。`;
+      rationale = `目前處於正 Gamma 區間 (${totalNetGex > 100000 ? "極強" : "溫和"}對沖壓制), 但價格已逼近${distToCallWall < distToPutWall ? ` Call Wall (主力強阻力: ${callWalls[0].strike})` : ` Put Wall (主力強支撐: ${putWalls[0].strike})`} 邊緣。大戶對沖盤整將轉為防守, 注意一旦突破可能引發劇烈的對沖清算，波動率有放大風險。`;
     } else {
       quadrant = "range_bound";
       label = "盤整";
-      rationale = `价格处于正 Gamma 安全区内部，远离关键边墙。做市商对冲机制 (Long Gamma, 逆势低买高卖) 将有效压制盘中波动，市场倾向于在 ${putWalls[0].strike} 至 ${callWalls[0].strike} 之间进行高抛低吸的区间震荡。`;
+      rationale = `價格處於正 Gamma 安全區內部，遠離關鍵邊牆。做市商對沖機制 (Long Gamma, 逆勢低買高賣) 將有效壓制盤中波動，市場傾向於在 ${putWalls[0].strike} 至 ${callWalls[0].strike} 之間進行高拋低吸的區間震盪。`;
     }
   } else {
     // negative
     if (distToFlip < 0.015) {
       quadrant = "chop_whipsaw";
       label = "負Gamma亂震";
-      rationale = `价格极度贴近 Gamma Flip 零轴零界点 (${flipLevel})。在此关键点位，做市商对冲态度可能频繁在 Long Gamma (顺势压制) 和 Short Gamma (顺势追杀) 之间频繁切换，极易引发两端插针、频繁洗盘的无序乱震行情。建议多看少动。`;
+      rationale = `價格極度貼近 Gamma Flip 零軸零界點 (${flipLevel})。在此關鍵點位，做市商對沖態度可能頻繁在 Long Gamma (順勢壓制) 和 Short Gamma (順勢追殺) 之間頻繁切換，極易引發兩端插針、頻繁洗盤的無序亂震行情。建議多看少動。`;
     } else {
       quadrant = "trending";
       label = "趨勢/擴張";
-      rationale = `处于负 Gamma 深度扩张区。做市商处于 Short Gamma 状态, 必须顺着趋势方向进行对冲 (价格下跌则卖出期货, 价格上涨则买入期货), 这种顺势对冲行为将极大放大日内趋势。突破 ${lastPrice < flipLevel ? "Put Wall 支撑后恐加速下行" : "Call Wall 后恐加速上行"}，维持强趋势扩张预期。`;
+      rationale = `處於負 Gamma 深度擴張區。做市商處於 Short Gamma 狀態, 必須順著趨勢方向進行對沖 (價格下跌則賣出期貨, 價格上漲則買入期貨), 這種順勢對沖行為將極大放大日內趨勢。突破 ${lastPrice < flipLevel ? "Put Wall 支撐後恐加速下行" : "Call Wall 後恐加速上行"}，維持強趨勢擴張預期。`;
     }
   }
 
   // 7. Generate Daily Plan Notes
   const planNotes: string[] = [];
   if (quadrant === "range_bound") {
-    planNotes.push(`【区间高抛低吸】建议在主力 Put Wall (${putWalls[0].strike}) 附近企稳做多，目标看至 Flip 关口 (${flipLevel}) 或 Call Wall (${callWalls[0].strike})。`);
-    planNotes.push(`【波动压制】在正 Gamma 压制下，日内极难走出干净的单边大趋势。除非有宏观消息催化，否则不宜盲目追涨杀跌。`);
-    planNotes.push(`【Max Pain 磁吸】当前结算价偏向 Max Pain (${maxPain})，收盘大概率向该价格收敛。`);
+    planNotes.push(`【區間高拋低吸】建議在主力 Put Wall (${putWalls[0].strike}) 附近企穩做多，目標看至 Flip 關口 (${flipLevel}) 或 Call Wall (${callWalls[0].strike})。`);
+    planNotes.push(`【波動壓制】在正 Gamma 壓制下，日內極難走出乾淨的單邊大趨勢。除非有宏觀訊息催化，否則不宜盲目追漲殺跌。`);
+    planNotes.push(`【Max Pain 磁吸】當前結算價偏向 Max Pain (${maxPain})，收盤大機率向該價格收斂。`);
   } else if (quadrant === "range_at_edge") {
-    planNotes.push(`【严防破位】关注 ${distToCallWall < distToPutWall ? `Call Wall ${callWalls[0].strike}` : `Put Wall ${putWalls[0].strike}`} 的防守情况。一旦放量突破且站稳 15 分钟，做市商将不得不空头平仓/买入对冲，产生挤压效应。`);
-    planNotes.push(`【分批防御】在边墙附近，如果没有突破信号，可以尝试轻仓反手，但必须严格以墙外 0.3% 作为止损线。`);
+    planNotes.push(`【嚴防破位】關注 ${distToCallWall < distToPutWall ? `Call Wall ${callWalls[0].strike}` : `Put Wall ${putWalls[0].strike}`} 的防守情況。一旦放量突破且站穩 15 分鐘，做市商將不得不空頭平倉/買入對沖，產生擠壓效應。`);
+    planNotes.push(`【分批防禦】在邊牆附近，如果沒有突破訊號，可以嘗試輕倉反手，但必須嚴格以牆外 0.3% 作為止損線。`);
   } else if (quadrant === "trending") {
-    planNotes.push(`【顺势而为】做市商 Short Gamma 自动对冲将不断放大价格波幅。建议顺日内趋势交易，不轻易抄底。`);
-    planNotes.push(`【关键阻力/支撑】若在 Flip 零轴下方运行，反弹至 Flip 级别 (${flipLevel}) 均是强阻力做空机会；下行关注 Expected Move 边缘 (${expectedMoveLow}) 止盈。`);
-    planNotes.push(`【波动率飙升】当前 VIX (${macro.VIX}) 处于活跃水平，Short Gamma 环境下日内宽幅震荡加剧，建议降低单笔头寸，放大止损。`);
+    planNotes.push(`【順勢而為】做市商 Short Gamma 自動對沖將不斷放大價格波幅。建議順日內趨勢交易，不輕易抄底。`);
+    planNotes.push(`【關鍵阻力/支撐】若在 Flip 零軸下方執行，反彈至 Flip 級別 (${flipLevel}) 均是強阻力做空機會；下行關注 Expected Move 邊緣 (${expectedMoveLow}) 止盈。`);
+    planNotes.push(`【波動率飆升】當前 VIX (${macro.VIX}) 處於活躍水平，Short Gamma 環境下日內寬幅震盪加劇，建議降低單筆頭寸，放大止損。`);
   } else {
-    planNotes.push(`【观望为宜】贴近 Gamma Flip 零轴 (${flipLevel})。价格在此容易产生无逻辑的上下插针扫损，不是干净的开仓点位。`);
-    planNotes.push(`【等待突破】等待价格脱离 Flip 零轴 0.5% 以上，确立日内主导 Gamma 状态（正 Gamma 回归或负 Gamma 倾斜）后，再行跟随。`);
+    planNotes.push(`【觀望為宜】貼近 Gamma Flip 零軸 (${flipLevel})。價格在此容易產生無邏輯的上下插針掃損，不是乾淨的開倉點位。`);
+    planNotes.push(`【等待突破】等待價格脫離 Flip 零軸 0.5% 以上，確立日內主導 Gamma 狀態（正 Gamma 迴歸或負 Gamma 傾斜）後，再行跟隨。`);
   }
 
   // ---- 規則籤條 (signals) + 信念度 (conviction) ----
@@ -415,7 +415,7 @@ export function analyzeMarketStructure(
     signals.push({ text: "價格逼近主力牆邊緣 (突破風險升高)", weight: -1 });
   }
   if (dataConfidence === "low") {
-    signals.push({ text: "數據覆蓋/信度偏低 (結論僅供參考)", weight: -1 });
+    signals.push({ text: "資料覆蓋/信度偏低 (結論僅供參考)", weight: -1 });
   }
 
   const signalScore = signals.reduce((acc, s) => acc + s.weight, 0);
