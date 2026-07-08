@@ -15,6 +15,7 @@ import { OptionDataFetchError, orchestrateOptionData } from "../providers/dataOr
 import { getMacroFromFred } from "../providers/fredMacro";
 import { analyzeMarketStructure } from "../utils/engine";
 import { fetchFuturesBasis, applyBasisToReport } from "../providers/futuresBasis";
+import { computeCmeGex } from "../cme/cmeGex";
 import { SupabaseStore } from "./supabaseStore";
 
 export interface RealDatabaseConfig {
@@ -232,6 +233,17 @@ export class RealMarketDatabase {
     const contracts: Array<RawOptionContract & { proxy: string }> = [];
     let snapshotDate = macroDate;
 
+    // 預載最新 CME NQ 期貨期權資料 (若有)。NQ 報告會優先用 CME 精算 (Black-76),
+    // 這是與 MenthorQ 同標的 (NQU2026 期貨期權) 的精確算法;沒有 CME 資料時退回 NDX 近似。
+    let cmeData: Awaited<ReturnType<SupabaseStore["getLatestCmeContracts"]>> = null;
+    if (this.config.store && !this.config.store.lastError) {
+      try {
+        cmeData = await this.config.store.getLatestCmeContracts();
+      } catch (e: any) {
+        warnings.push(`CME data load failed: ${e?.message || e}`);
+      }
+    }
+
     for (const instrument of this.instruments.filter((item) => item.enabled)) {
       try {
         const result = await orchestrateOptionData(instrument.indexSymbol, {
@@ -275,7 +287,44 @@ export class RealMarketDatabase {
           );
         }
 
-        reports.push(report);
+        // === CME 精算優先 (僅 NQ,且有 CME 資料時) ===
+        // 用 CME 官方期貨期權 + Black-76 直接算 GEX,取代 NDX 近似。
+        let finalReport = report;
+        const isNqWithCme =
+          instrument.futuresCode.toUpperCase() === "NQ" &&
+          cmeData &&
+          cmeData.contracts.length > 0 &&
+          cmeData.futuresSettlement > 0;
+
+        if (isNqWithCme && cmeData) {
+          try {
+            const cme = computeCmeGex(cmeData.contracts, cmeData.futuresSettlement);
+            if (cme.resolved.length > 0) {
+              const cmeOvHigh = Math.round(cme.futuresSettlement * 1.003);
+              const cmeOvLow = Math.round(cme.futuresSettlement * 0.997);
+              const cmeReport = analyzeMarketStructure(
+                "NQ",
+                `${cmeData.contracts[0].underlyingContract} (CME)`,
+                `${cme.tradeDate}T16:00:00-04:00`,
+                cme.futuresSettlement,
+                cme.resolved,
+                cme.ivReconstructedPct >= 70 ? "high" : cme.ivReconstructedPct >= 40 ? "medium" : "low",
+                cmeOvHigh,
+                cmeOvLow,
+                macro,
+              );
+              // CME 已是期貨座標,不需基差調整
+              finalReport = cmeReport;
+              warnings.push(
+                `NQ report computed from CME official futures options (Black-76). Trade date ${cme.tradeDate}, futures settle ${cme.futuresSettlement}, IV reconstructed ${cme.ivReconstructedPct}%.`,
+              );
+            }
+          } catch (e: any) {
+            warnings.push(`CME GEX compute failed, fell back to index proxy: ${e?.message || e}`);
+          }
+        }
+
+        reports.push(finalReport);
         reconciliations.push(...result.reconciliations.map((record) => ({ ...record, snapshot_timestamp: snapshotTimestamp })));
         contracts.push(...result.rawContracts.map((contract) => ({ ...contract, proxy: instrument.indexSymbol })));
       } catch (error: any) {

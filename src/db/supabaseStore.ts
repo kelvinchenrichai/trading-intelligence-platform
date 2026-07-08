@@ -4,7 +4,7 @@
  */
 import { DailyReport, DataReconciliation, MacroData, SourceStatus } from "../types";
 import { RawOptionContract } from "../providers/types";
-import { CmeNqImportResult, StoredCmeImport } from "../cme/types";
+import { CmeNqImportResult, CmeNqOptionContract, StoredCmeImport } from "../cme/types";
 
 export interface RefreshPayload {
   snapshotDate: string;
@@ -298,6 +298,55 @@ export class SupabaseStore {
       limit: "30",
     });
     return rows.map((row) => this.mapCmeImport(row));
+  }
+
+  /**
+   * 讀取最新一筆 CME 匯入的完整期權合約 (供 GEX 精算)。
+   * 回傳 null 表示尚無 CME 資料 (呼叫端會退回 NDX 近似)。
+   */
+  async getLatestCmeContracts(): Promise<{
+    tradeDate: string;
+    futuresSettlement: number;
+    contracts: CmeNqOptionContract[];
+  } | null> {
+    const imports = await this.request<any[]>("GET", "cme_bulletin_imports", {
+      select: "id,trade_date,futures_settlement",
+      order: "created_at.desc",
+      limit: "1",
+    });
+    const latest = imports[0];
+    if (!latest) return null;
+
+    const rows = await this.request<any[]>("GET", "cme_nq_option_contracts", {
+      select: "trade_date,underlying_contract,option_family,option_code,expiry_label,expiry_date,expiry_precision,option_type,strike,settlement,delta,open_interest,volume,source_page",
+      import_id: `eq.${latest.id}`,
+      limit: "20000",
+    });
+    if (!rows || rows.length === 0) return null;
+
+    const contracts: CmeNqOptionContract[] = rows.map((r) => ({
+      tradeDate: r.trade_date,
+      underlyingContract: r.underlying_contract,
+      optionFamily: r.option_family,
+      optionCode: r.option_code,
+      expiryLabel: r.expiry_label,
+      expiryDate: r.expiry_date,
+      expiryPrecision: r.expiry_precision,
+      optionType: r.option_type,
+      strike: Number(r.strike),
+      settlement: r.settlement === null ? null : Number(r.settlement),
+      delta: r.delta === null ? null : Number(r.delta),
+      openInterest: Number(r.open_interest),
+      volume: Number(r.volume),
+      sourcePage: Number(r.source_page),
+      rawRow: {},
+    }));
+
+    return {
+      tradeDate: latest.trade_date,
+      futuresSettlement: Number(latest.futures_settlement),
+      contracts,
+    };
   }
 
   private mapCmeImport(row: any): StoredCmeImport {
