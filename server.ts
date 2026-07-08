@@ -42,6 +42,30 @@ function refreshAuthorized(req: express.Request): boolean {
   return Boolean(expected && req.get("x-refresh-token") === expected);
 }
 
+
+const TV_EVENTS = new Set([
+  "GAMMA_FLIP_TOUCH",
+  "GAMMA_FLIP_RECLAIM",
+  "GAMMA_FLIP_REJECT",
+  "CALL_WALL_TOUCH",
+  "CALL_WALL_BREAKOUT_2X5M",
+  "PUT_WALL_TOUCH",
+  "PUT_WALL_BREAKDOWN_2X5M",
+  "WALL_FLIPPED_SUPPORT",
+  "WALL_FLIPPED_RESISTANCE",
+  "BOS_UP",
+  "BOS_DOWN",
+  "AVWAP_RECLAIM",
+  "AVWAP_REJECT",
+  "CONFLUENCE_ZONE_ENTER",
+]);
+
+function tradingViewAuthorized(payload: any, req: express.Request): boolean {
+  const expected = process.env.TV_WEBHOOK_SECRET || process.env.TRADINGVIEW_WEBHOOK_SECRET;
+  if (!expected) return false;
+  return payload?.secret === expected || req.get("x-tv-secret") === expected;
+}
+
 async function startServer() {
   const app = express();
   const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 15 * 1024 * 1024, files: 1, fields: 4 }, fileFilter: (_req, file, callback) => {
@@ -101,6 +125,40 @@ async function startServer() {
     } catch (error: any) {
       console.error("[cme-import]", error?.message || error);
       return res.status(422).json({ error: error?.message || "CME PDF could not be parsed.", code: "CME_PARSE_FAILED" });
+    }
+  });
+
+
+  app.post("/api/tradingview/webhook", async (req, res) => {
+    const payload = req.body || {};
+    if (!tradingViewAuthorized(payload, req)) {
+      return res.status(403).json({ ok: false, error: "Invalid or missing TradingView webhook secret.", code: "TV_WEBHOOK_FORBIDDEN" });
+    }
+    if (!TV_EVENTS.has(payload.event)) {
+      return res.status(400).json({ ok: false, error: `Unsupported TradingView event: ${payload.event || "missing"}`, code: "TV_EVENT_UNSUPPORTED" });
+    }
+    const store = SupabaseStore.fromEnvironment();
+    if (!store) return res.status(503).json({ ok: false, error: "Supabase is required for TradingView webhook persistence.", code: "TV_STORE_NOT_CONFIGURED" });
+    try {
+      await store.persistTradingViewEvent(payload);
+      const state = await store.getTradingViewSessionState(payload.modelDate || payload.model_date, payload.underlying);
+      return res.json({ ok: true, state });
+    } catch (error: any) {
+      console.error("[tradingview-webhook]", error?.message || error);
+      return res.status(503).json({ ok: false, error: error?.message || "Unable to persist TradingView webhook event.", code: "TV_STORE_ERROR" });
+    }
+  });
+
+  app.get("/api/tradingview/session", async (req, res) => {
+    const modelDate = typeof req.query.modelDate === "string" ? req.query.modelDate : "";
+    const underlying = typeof req.query.underlying === "string" ? req.query.underlying : undefined;
+    if (!modelDate) return res.status(400).json({ error: "Missing modelDate parameter", code: "BAD_REQUEST" });
+    const store = SupabaseStore.fromEnvironment();
+    if (!store) return res.status(503).json({ error: "Supabase is required for TradingView session state.", code: "TV_STORE_NOT_CONFIGURED" });
+    try {
+      return res.json(await store.getTradingViewSessionState(modelDate, underlying));
+    } catch (error: any) {
+      return res.status(503).json({ error: error?.message || "Unable to load TradingView session state", code: "TV_STORE_ERROR" });
     }
   });
 

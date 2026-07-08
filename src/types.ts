@@ -62,6 +62,113 @@ export interface GexStrikeData {
   oi: number;
 }
 
+
+export type DataMode = "CME_PG40" | "NDX_PROXY_FALLBACK" | "HYBRID_CONFLUENCE" | "NO_DATA";
+export type CurrentModel = "CME Official EOD Map" | "NDX Proxy Fallback" | "Hybrid / Confluence" | "No Data";
+
+export interface ExpiryGexSummary {
+  label: string;
+  expiryDate: string;
+  dte: number;
+  callWall: number | null;
+  putWall: number | null;
+  gammaFlip: number | null;
+  gammaPivot: number | null;
+  netGex: number;
+  grossGex: number;
+  positiveGex: number;
+  negativeGex: number;
+  expiryStructureImpactPct: number;
+  strikeCount: number;
+  gexStrikes: GexStrikeData[];
+}
+
+export interface DataSourceStatusBlock {
+  currentModel: CurrentModel;
+  dataMode: DataMode;
+  primarySource: string;
+  dashboardDate: string;
+  cmeTradeDate?: string | null;
+  cmeImportId?: string | null;
+  cmeUnderlying?: string | null;
+  cmeFuturesSettlement?: number | null;
+  cmeImportTimestamp?: string | null;
+  cmeContractsParsed?: number | null;
+  cmeExpiryGroups?: number | null;
+  fallbackUsed: boolean;
+  fallbackReason?: string | null;
+  sourceWarnings: string[];
+  proxy?: {
+    instrument: string;
+    snapshotDate?: string | null;
+    available: boolean;
+  };
+  sessionFlow?: {
+    available: boolean;
+    note: string;
+  };
+}
+
+export interface CmeAuditStatus {
+  tradeDate: string;
+  underlyingContract: string;
+  futuresSettlement: number;
+  parsedContractsCount: number;
+  expiryGroupsCount: number;
+  totalCallOi: number;
+  totalPutOi: number;
+  totalVolume: number;
+  pdfHash?: string | null;
+  importTimestamp?: string | null;
+  parserVersion?: string | null;
+  warnings: string[];
+  duplicateStatus?: string | null;
+}
+
+export interface TradingViewPayloads {
+  simpleCsv: string;
+  keyValue: string;
+  compact: string;
+}
+
+export interface SessionMonitorState {
+  lastEvent?: string | null;
+  gammaFlipTouched: boolean;
+  gammaFlipReclaimed: boolean;
+  callWallTouched: boolean;
+  callWallBreakoutConfirmed: boolean;
+  putWallTouched: boolean;
+  putWallBreakdownConfirmed: boolean;
+  wallFlipped?: "support" | "resistance" | null;
+  currentSessionRegime: "No Edge" | "Consolidation / Pin" | "Expansion Up" | "Expansion Down" | "Neutral / Wait";
+  explanation: string;
+  updatedAt?: string | null;
+}
+
+export interface PlaybookOutput {
+  bias: string;
+  favor: string;
+  avoid: string;
+  trigger: string;
+  invalidation: string;
+  keyLevels: Array<{ label: string; level: number | null }>;
+  confidence: "high" | "medium" | "low";
+  warnings: string[];
+}
+
+export interface OfficialProxyConfluence {
+  cmeCallWall?: number | null;
+  proxyCallWall?: number | null;
+  callWallDiffPts?: number | null;
+  cmePutWall?: number | null;
+  proxyPutWall?: number | null;
+  putWallDiffPts?: number | null;
+  cmeRegime?: string | null;
+  proxyRegime?: string | null;
+  score: "High" | "Medium" | "Low" | "Unavailable";
+  note: string;
+}
+
 export interface DailyReport {
   instrument: string;
   proxy: string;
@@ -103,6 +210,20 @@ export interface DailyReport {
     US10Y: number;
   };
   plan_notes: string[];
+  data_mode?: DataMode;
+  primary_source?: string;
+  source_status?: DataSourceStatusBlock;
+  cme_audit?: CmeAuditStatus;
+  expiry_breakdown?: ExpiryGexSummary[];
+  selected_expiry_panels?: ExpiryGexSummary[];
+  tradingview_payloads?: TradingViewPayloads;
+  session_monitor?: SessionMonitorState;
+  playbook?: PlaybookOutput;
+  confluence?: OfficialProxyConfluence;
+  calculation_mode?: string;
+  gross_gex?: number;
+  total_net_gex?: number;
+  top_abs_gex_strikes?: Array<{ strike: number; gex: number; rank: number }>;
 }
 
 export type SourceState = "ok" | "failed" | "not_configured" | "not_attempted";

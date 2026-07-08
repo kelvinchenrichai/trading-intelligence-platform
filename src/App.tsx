@@ -32,12 +32,17 @@ import { AuditPanel } from "./components/AuditPanel";
 import { HistoryReview } from "./components/HistoryReview";
 import { BacktestValidation } from "./components/BacktestValidation";
 import { CmeBulletinImport } from "./components/CmeBulletinImport";
-import { SidebarNav, BottomNav } from "./components/PageNav";
+import { PageKey, SidebarNav, BottomNav } from "./components/PageNav";
 import { CmeDownloadLinks } from "./components/CmeDownloadLinks";
 import { AuthButton } from "./components/AuthButton";
 import { LoginPage } from "./components/LoginPage";
 import { UpdateStatus } from "./components/UpdateStatus";
 import { WallComparison } from "./components/WallComparison";
+import { DataSourceStatus } from "./components/DataSourceStatus";
+import { MultiExpirationMap } from "./components/MultiExpirationMap";
+import { PlaybookPanel } from "./components/PlaybookPanel";
+import { SessionMonitor } from "./components/SessionMonitor";
+import { TradingViewExport } from "./components/TradingViewExport";
 import { useAuth } from "./auth";
 import { translations } from "./utils/translations";
 
@@ -63,7 +68,7 @@ export default function App() {
   const isAdmin = auth.role === "admin";
 
   // Sidebar / bottom-nav active page. 四個分頁:dashboard/backtest/cme/about
-  const [activePage, setActivePage] = useState<"dashboard" | "backtest" | "cme" | "about">("dashboard");
+  const [activePage, setActivePage] = useState<PageKey>("dashboard");
   const [mobileNavOpen, setMobileNavOpen] = useState<boolean>(false);
 
   const t = translations[lang];
@@ -457,6 +462,8 @@ export default function App() {
           </div>
         )}
 
+        {report && <DataSourceStatus report={report} lang={lang} />}
+
         {/* 2.3 Dashboard Workspace Container */}
         {loading ? (
           <div className="h-96 flex flex-col items-center justify-center gap-4">
@@ -477,17 +484,22 @@ export default function App() {
               <>
                 {/* Core Report Cards */}
                 <ReportCard report={report} lang={lang} />
+                <MultiExpirationMap report={report} lang={lang} />
+                <PlaybookPanel report={report} lang={lang} />
+                <SessionMonitor report={report} lang={lang} />
 
                 {/* GEX Divergent chart */}
                 <GexChart 
                   gexData={report.gamma.gex_strikes} 
                   spotPrice={report.price.last} 
                   flipLevel={report.gamma.flip_level} 
+                  callWall={report.gamma.call_walls[0]?.strike}
+                  putWall={report.gamma.put_walls[0]?.strike}
                   lang={lang}
                 />
 
                 {/* Audit Reconciliation Ledger */}
-                <AuditPanel proxy={report.proxy} date={activeDate} lang={lang} />
+                <AuditPanel proxy={report.proxy} date={activeDate} lang={lang} report={report} />
               </>
             )}
           </div>
@@ -511,6 +523,8 @@ export default function App() {
                       gexData={report.gamma.gex_strikes} 
                       spotPrice={report.price.last} 
                       flipLevel={report.gamma.flip_level} 
+                      callWall={report.gamma.call_walls[0]?.strike}
+                      putWall={report.gamma.put_walls[0]?.strike}
                       lang={lang}
                     />
                   </>
@@ -530,6 +544,8 @@ export default function App() {
                       gexData={parallelReport.gamma.gex_strikes} 
                       spotPrice={parallelReport.price.last} 
                       flipLevel={parallelReport.gamma.flip_level} 
+                      callWall={parallelReport.gamma.call_walls[0]?.strike}
+                      putWall={parallelReport.gamma.put_walls[0]?.strike}
                       lang={lang}
                     />
                   </>
@@ -545,7 +561,7 @@ export default function App() {
             {/* In Parallel Mode, both refer to the same audit */}
             {report && (
               <>
-                <AuditPanel proxy={report.proxy} date={activeDate} lang={lang} />
+                <AuditPanel proxy={report.proxy} date={activeDate} lang={lang} report={report} />
               </>
             )}
           </div>
@@ -622,6 +638,11 @@ export default function App() {
               )}
             </div>
           )
+        )}
+
+        {/* ===== TRADINGVIEW PAGE ===== */}
+        {activePage === "tradingview" && (
+          <TradingViewExport report={report} lang={lang} />
         )}
 
         {/* ===== ABOUT PAGE ===== */}

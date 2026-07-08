@@ -32,9 +32,10 @@ export function calculateGex(
   gamma: number,
   oi: number,
   spot: number,
-  optionType: "call" | "put"
+  optionType: "call" | "put",
+  contractMultiplier: number = 100
 ): number {
-  const gexVal = gamma * oi * 100 * (spot * spot) * 0.01;
+  const gexVal = gamma * oi * contractMultiplier * (spot * spot) * 0.01;
   return optionType === "call" ? gexVal : -gexVal;
 }
 
@@ -161,6 +162,12 @@ export function reconcileData(
 /**
  * Main Analysis Engine
  */
+export interface AnalyzeMarketStructureOptions {
+  contractMultiplier?: number;
+  gammaCalculator?: (spot: number, strike: number, tYears: number, iv: number, optionType: "call" | "put") => number;
+  calculationMode?: string;
+}
+
 export function analyzeMarketStructure(
   instrument: string,
   proxy: string,
@@ -177,8 +184,11 @@ export function analyzeMarketStructure(
   dataConfidence: "high" | "medium" | "low",
   overnightHigh: number,
   overnightLow: number,
-  macro: { VIX: number; DXY: number; US10Y: number }
+  macro: { VIX: number; DXY: number; US10Y: number },
+  options: AnalyzeMarketStructureOptions = {}
 ): DailyReport {
+  const contractMultiplier = options.contractMultiplier ?? 100;
+  const gammaCalculator = options.gammaCalculator ?? ((spot: number, strike: number, tYears: number, iv: number) => calculateBSGamma(spot, strike, tYears, iv));
   const snapshotDate = asOf.split("T")[0];
 
   // 1. Calculate Standard Expected Move
@@ -211,9 +221,9 @@ export function analyzeMarketStructure(
 
     const tOptionDays = Math.max(1, (new Date(o.expiry).getTime() - new Date(snapshotDate).getTime()) / (1000 * 60 * 60 * 24));
     const tOptionYears = tOptionDays / 365;
-    const computedGamma = calculateBSGamma(lastPrice, o.strike, tOptionYears, o.iv);
+    const computedGamma = gammaCalculator(lastPrice, o.strike, tOptionYears, o.iv, o.option_type);
 
-    const gex = calculateGex(computedGamma, o.oi, lastPrice, o.option_type);
+    const gex = calculateGex(computedGamma, o.oi, lastPrice, o.option_type, contractMultiplier);
     strikesMap[strike].oi += o.oi;
 
     if (o.option_type === "call") {
@@ -254,8 +264,8 @@ export function analyzeMarketStructure(
     for (const o of resolvedOptions) {
       const tOptionDays = Math.max(1, (new Date(o.expiry).getTime() - new Date(snapshotDate).getTime()) / (1000 * 60 * 60 * 24));
       const tOptionYears = tOptionDays / 365;
-      const hypGamma = calculateBSGamma(hypSpot, o.strike, tOptionYears, o.iv);
-      const gex = calculateGex(hypGamma, o.oi, hypSpot, o.option_type);
+      const hypGamma = gammaCalculator(hypSpot, o.strike, tOptionYears, o.iv, o.option_type);
+      const gex = calculateGex(hypGamma, o.oi, hypSpot, o.option_type, contractMultiplier);
       hypNetGex += gex;
     }
 
@@ -469,5 +479,12 @@ export function analyzeMarketStructure(
       US10Y: macro.US10Y,
     },
     plan_notes: planNotes,
+    calculation_mode: options.calculationMode,
+    gross_gex: gexStrikes.reduce((acc, s) => acc + Math.abs(s.net_gex), 0),
+    total_net_gex: totalNetGex,
+    top_abs_gex_strikes: [...gexStrikes]
+      .sort((a, b) => Math.abs(b.net_gex) - Math.abs(a.net_gex))
+      .slice(0, 20)
+      .map((s, index) => ({ strike: s.strike, gex: s.net_gex, rank: index + 1 })),
   };
 }

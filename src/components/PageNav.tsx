@@ -10,9 +10,9 @@
  */
 
 import React from "react";
-import { LayoutDashboard, Target, FileText, Info } from "lucide-react";
+import { LayoutDashboard, Target, FileText, Info, RadioTower } from "lucide-react";
 
-export type PageKey = "dashboard" | "backtest" | "cme" | "about";
+export type PageKey = "dashboard" | "backtest" | "cme" | "tradingview" | "about";
 
 interface PageNavProps {
   active: PageKey;
@@ -24,6 +24,7 @@ const items: { key: PageKey; icon: React.ReactNode; zh: string; en: string }[] =
   { key: "dashboard", icon: <LayoutDashboard className="w-5 h-5" />, zh: "儀表板", en: "Dashboard" },
   { key: "backtest", icon: <Target className="w-5 h-5" />, zh: "回測分析", en: "Backtest" },
   { key: "cme", icon: <FileText className="w-5 h-5" />, zh: "CME 數據", en: "CME Data" },
+  { key: "tradingview", icon: <RadioTower className="w-5 h-5" />, zh: "TradingView", en: "TradingView" },
   { key: "about", icon: <Info className="w-5 h-5" />, zh: "說明", en: "About" },
 ];
 

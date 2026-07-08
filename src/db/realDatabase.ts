@@ -16,6 +16,7 @@ import { getMacroFromFred } from "../providers/fredMacro";
 import { analyzeMarketStructure } from "../utils/engine";
 import { fetchFuturesBasis, applyBasisToReport } from "../providers/futuresBasis";
 import { computeCmeGex } from "../cme/cmeGex";
+import { analyzeCmeResolved, buildCmeAuditStatus, buildCmeExpiryBreakdown, buildConfluence, buildDefaultSessionMonitor, buildPlaybook, buildTradingViewPayloads } from "../cme/report";
 import { SupabaseStore } from "./supabaseStore";
 
 export interface RealDatabaseConfig {
@@ -233,17 +234,6 @@ export class RealMarketDatabase {
     const contracts: Array<RawOptionContract & { proxy: string }> = [];
     let snapshotDate = macroDate;
 
-    // 預載最新 CME NQ 期貨期權資料 (若有)。NQ 報告會優先用 CME 精算 (Black-76),
-    // 這是與 MenthorQ 同標的 (NQU2026 期貨期權) 的精確算法;沒有 CME 資料時退回 NDX 近似。
-    let cmeData: Awaited<ReturnType<SupabaseStore["getLatestCmeContracts"]>> = null;
-    if (this.config.store && !this.config.store.lastError) {
-      try {
-        cmeData = await this.config.store.getLatestCmeContracts();
-      } catch (e: any) {
-        warnings.push(`CME data load failed: ${e?.message || e}`);
-      }
-    }
-
     for (const instrument of this.instruments.filter((item) => item.enabled)) {
       try {
         const result = await orchestrateOptionData(instrument.indexSymbol, {
@@ -287,40 +277,91 @@ export class RealMarketDatabase {
           );
         }
 
-        // === CME 精算優先 (僅 NQ,且有 CME 資料時) ===
-        // 用 CME 官方期貨期權 + Black-76 直接算 GEX,取代 NDX 近似。
+        // Default role: Layer 2 proxy / fallback. CME may override only when tradeDate === Dashboard date.
         let finalReport = report;
-        const isNqWithCme =
-          instrument.futuresCode.toUpperCase() === "NQ" &&
-          cmeData &&
-          cmeData.contracts.length > 0 &&
-          cmeData.futuresSettlement > 0;
+        finalReport.data_mode = "NDX_PROXY_FALLBACK";
+        finalReport.primary_source = `${instrument.indexSymbol} proxy`;
+        finalReport.source_status = {
+          currentModel: "NDX Proxy Fallback",
+          dataMode: "NDX_PROXY_FALLBACK",
+          primarySource: `${instrument.indexSymbol} proxy`,
+          dashboardDate: result.snapshotDate,
+          cmeTradeDate: null,
+          cmeImportId: null,
+          cmeUnderlying: null,
+          cmeFuturesSettlement: null,
+          cmeImportTimestamp: null,
+          cmeContractsParsed: null,
+          cmeExpiryGroups: null,
+          fallbackUsed: true,
+          fallbackReason: "No exact-date CME PG40 was available for this dashboard date.",
+          sourceWarnings: [
+            `${instrument.indexSymbol} / proxy levels are for confluence only and are not CME futures options OI consensus.`,
+          ],
+          proxy: { instrument: instrument.indexSymbol, snapshotDate: result.snapshotDate, available: true },
+          sessionFlow: { available: false, note: "Session Flow unavailable — currently using EOD OI baseline." },
+        };
+        finalReport.tradingview_payloads = buildTradingViewPayloads(finalReport);
+        finalReport.session_monitor = buildDefaultSessionMonitor(finalReport);
+        finalReport.playbook = buildPlaybook(finalReport);
 
-        if (isNqWithCme && cmeData) {
+        // === CME 精算優先 (僅 NQ,且 tradeDate 嚴格等於 Dashboard date) ===
+        // CME PG40 是 Layer 1 Official EOD Baseline，不是 live flow；NDX 只保留為 confluence。
+        if (instrument.futuresCode.toUpperCase() === "NQ" && this.config.store && !this.config.store.lastError) {
           try {
-            const cme = computeCmeGex(cmeData.contracts, cmeData.futuresSettlement);
-            if (cme.resolved.length > 0) {
-              const cmeOvHigh = Math.round(cme.futuresSettlement * 1.003);
-              const cmeOvLow = Math.round(cme.futuresSettlement * 0.997);
-              const cmeReport = analyzeMarketStructure(
-                "NQ",
-                `${cmeData.contracts[0].underlyingContract} (CME)`,
-                `${cme.tradeDate}T16:00:00-04:00`,
-                cme.futuresSettlement,
+            const cmeData = await this.config.store.getCmeContractsByTradeDate(result.snapshotDate);
+            if (cmeData && cmeData.contracts.length > 0 && cmeData.futuresSettlement > 0) {
+              const cme = computeCmeGex(cmeData.contracts, cmeData.futuresSettlement);
+              const cmeConfidence: "high" | "medium" | "low" = cme.ivReconstructedPct >= 70 ? "high" : cme.ivReconstructedPct >= 40 ? "medium" : "low";
+              const cmeReport = analyzeCmeResolved(
+                cmeData.underlyingContract,
+                cmeData.tradeDate,
+                cmeData.futuresSettlement,
                 cme.resolved,
-                cme.ivReconstructedPct >= 70 ? "high" : cme.ivReconstructedPct >= 40 ? "medium" : "low",
-                cmeOvHigh,
-                cmeOvLow,
+                cmeConfidence,
                 macro,
               );
-              // CME 已是期貨座標,不需基差調整
+              const { expiryBreakdown, selectedPanels } = buildCmeExpiryBreakdown(cmeData, cme.resolved, cmeConfidence, macro);
+              cmeReport.data_mode = "CME_PG40";
+              cmeReport.primary_source = "CME PG40 Official EOD";
+              cmeReport.source_status = {
+                currentModel: "CME Official EOD Map",
+                dataMode: "CME_PG40",
+                primarySource: "CME PG40 Official EOD",
+                dashboardDate: result.snapshotDate,
+                cmeTradeDate: cmeData.tradeDate,
+                cmeImportId: cmeData.id,
+                cmeUnderlying: cmeData.underlyingContract,
+                cmeFuturesSettlement: cmeData.futuresSettlement,
+                cmeImportTimestamp: cmeData.createdAt || null,
+                cmeContractsParsed: cmeData.contracts.length,
+                cmeExpiryGroups: expiryBreakdown.length,
+                fallbackUsed: false,
+                fallbackReason: null,
+                sourceWarnings: [
+                  ...cmeData.warnings,
+                  `CME Black-76 futures-options engine used with NQ multiplier 20. IV reconstructed ${cme.ivReconstructedPct}%.`,
+                  "Session Flow unavailable — currently using CME EOD OI baseline until TradingView webhook events arrive.",
+                ],
+                proxy: { instrument: instrument.indexSymbol, snapshotDate: result.snapshotDate, available: true },
+                sessionFlow: { available: false, note: "Session Flow unavailable — currently using CME EOD OI baseline." },
+              };
+              cmeReport.cme_audit = buildCmeAuditStatus(cmeData);
+              cmeReport.expiry_breakdown = expiryBreakdown;
+              cmeReport.selected_expiry_panels = selectedPanels;
+              cmeReport.tradingview_payloads = buildTradingViewPayloads(cmeReport);
+              cmeReport.session_monitor = buildDefaultSessionMonitor(cmeReport);
+              cmeReport.playbook = buildPlaybook(cmeReport);
+              cmeReport.confluence = buildConfluence(cmeReport, report);
               finalReport = cmeReport;
               warnings.push(
-                `NQ report computed from CME official futures options (Black-76). Trade date ${cme.tradeDate}, futures settle ${cme.futuresSettlement}, IV reconstructed ${cme.ivReconstructedPct}%.`,
+                `NQ report computed from exact-date CME PG40 official futures options. Trade date ${cme.tradeDate}, futures settle ${cme.futuresSettlement}, IV reconstructed ${cme.ivReconstructedPct}%.`,
               );
+            } else {
+              warnings.push(`NQ: no CME PG40 import found for dashboard date ${result.snapshotDate}; using NDX Proxy Fallback and clearly marking fallback mode.`);
             }
           } catch (e: any) {
-            warnings.push(`CME GEX compute failed, fell back to index proxy: ${e?.message || e}`);
+            warnings.push(`CME exact-date load/compute failed for ${result.snapshotDate}; fell back to NDX proxy: ${e?.message || e}`);
           }
         }
 

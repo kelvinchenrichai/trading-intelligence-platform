@@ -1,137 +1,84 @@
-/**
- * @license
- * SPDX-License-Identifier: Apache-2.0
- *
- * GexChart — 水平專業版 (MenthorQ 風格)
- *
- * 設計對齊付費版 GEX 報告的專業慣例:
- *  - Strike 在 Y 軸 (縱向,符合交易者看價格的直覺)
- *  - GEX 在 X 軸 (橫向長條,綠色正 GEX 向右、紅色負 GEX 向左)
- *  - 疊加黃色 "GEX Profile" 累積曲線
- *  - Call Resistance (紅虛線)、Put Support (綠虛線)、Gamma Flip / HVL (黃虛線) 水平線
- *
- * 保留原本的 props 介面 (gexData / spotPrice / flipLevel / lang),
- * 額外接受可選的 callWall / putWall 讓 App 傳入引擎算好的精確牆位;
- * 若未傳入則從 gexData 推導,確保向後相容、App 不改也能運作。
- */
-
-import React from "react";
-import {
-  ResponsiveContainer,
-  ComposedChart,
-  Bar,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  ReferenceLine,
-  Cell,
-} from "recharts";
+import React, { useMemo, useRef, useState } from "react";
+import { ResponsiveContainer, ComposedChart, Bar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ReferenceLine, Cell } from "recharts";
 import { GexStrikeData } from "../types";
+
+type ViewMode = "trade" | "top" | "full";
+type FilterMode = "all" | "oi" | "top50" | "spot500" | "spot1000" | "spot1500";
 
 interface GexChartProps {
   gexData: GexStrikeData[];
   spotPrice: number;
   flipLevel: number;
   lang?: "zh" | "en";
-  /** 可選:引擎算好的精確牆位與現貨,傳入則優先使用 */
   callWall?: number;
   putWall?: number;
 }
 
-const POS = "#22C55E"; // 正 GEX 綠
-const NEG = "#EF4444"; // 負 GEX 紅
-const PROFILE = "#EAB308"; // GEX Profile 黃線
-const FLIP = "#F2A93B"; // Gamma Flip / HVL 橙黃
-const SPOT = "#818CF8"; // 現貨
+const POS = "#22C55E";
+const NEG = "#EF4444";
+const PROFILE = "#EAB308";
+const FLIP = "#F2A93B";
+const SPOT = "#818CF8";
 
-export const GexChart: React.FC<GexChartProps> = ({
-  gexData,
-  spotPrice,
-  flipLevel,
-  lang = "zh",
-  callWall,
-  putWall,
-}) => {
+const fmt = (val: number) => {
+  const a = Math.abs(val);
+  const s = val >= 0 ? "+" : "-";
+  if (a >= 1e9) return `${s}${(a / 1e9).toFixed(2)}B`;
+  if (a >= 1e6) return `${s}${(a / 1e6).toFixed(1)}M`;
+  if (a >= 1e3) return `${s}${(a / 1e3).toFixed(0)}k`;
+  return `${s}${a.toFixed(0)}`;
+};
+
+export const GexChart: React.FC<GexChartProps> = ({ gexData, spotPrice, flipLevel, lang = "zh", callWall, putWall }) => {
   const isZh = lang === "zh";
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [view, setView] = useState<ViewMode>("trade");
+  const [filter, setFilter] = useState<FilterMode>("spot1000");
+  const sorted = useMemo(() => [...gexData].sort((a, b) => a.strike - b.strike), [gexData]);
+  const resolvedCallWall = callWall ?? [...sorted].sort((a, b) => b.net_gex - a.net_gex)[0]?.strike;
+  const resolvedPutWall = putWall ?? [...sorted].sort((a, b) => a.net_gex - b.net_gex)[0]?.strike;
 
-  const fmt = (val: number) => {
-    const a = Math.abs(val);
-    const s = val >= 0 ? "+" : "-";
-    if (a >= 1e9) return `${s}${(a / 1e9).toFixed(2)}B`;
-    if (a >= 1e6) return `${s}${(a / 1e6).toFixed(1)}M`;
-    if (a >= 1e3) return `${s}${(a / 1e3).toFixed(0)}k`;
-    return `${s}${a.toFixed(0)}`;
+  const includeKeyLevels = (rows: GexStrikeData[]) => {
+    const levels = [spotPrice, flipLevel, resolvedCallWall, resolvedPutWall].filter((x): x is number => typeof x === "number" && Number.isFinite(x));
+    const extras = levels.map((lvl) => sorted.reduce((prev, curr) => Math.abs(curr.strike - lvl) < Math.abs(prev.strike - lvl) ? curr : prev, sorted[0])).filter(Boolean);
+    const map = new Map<number, GexStrikeData>();
+    [...rows, ...extras].forEach((r) => map.set(r.strike, r));
+    return [...map.values()].sort((a, b) => a.strike - b.strike);
   };
 
-  // 依 strike 由小到大排序 (Y 軸由下到上 = 價格由低到高)
-  const sorted = [...gexData].sort((a, b) => a.strike - b.strike);
+  const visible = useMemo(() => {
+    let rows = sorted;
+    const activeFilter = view === "trade" ? "spot1000" : view === "top" ? "top50" : filter;
+    if (activeFilter === "oi") rows = rows.filter((r) => r.oi > 0);
+    if (activeFilter === "top50") rows = includeKeyLevels([...rows].sort((a, b) => Math.abs(b.net_gex) - Math.abs(a.net_gex)).slice(0, 50));
+    if (activeFilter === "spot500") rows = rows.filter((r) => Math.abs(r.strike - spotPrice) <= 500);
+    if (activeFilter === "spot1000") rows = rows.filter((r) => Math.abs(r.strike - spotPrice) <= 1000);
+    if (activeFilter === "spot1500") rows = rows.filter((r) => Math.abs(r.strike - spotPrice) <= 1500);
+    return includeKeyLevels(rows).sort((a, b) => a.strike - b.strike);
+  }, [sorted, view, filter, spotPrice, flipLevel, resolvedCallWall, resolvedPutWall]);
 
-  // 計算 GEX Profile 累積曲線 (由低 strike 往高 strike 累加 net_gex)
   let cumulative = 0;
-  const ascending = sorted.map((d) => {
-    cumulative += d.net_gex;
-    return { ...d, profile: cumulative };
-  });
-  // 顯示順序:高價在上、低價在下 (交易圖表慣例;修正先前 Y 軸方向顛倒的問題)
-  const withProfile = [...ascending].reverse();
+  const withProfileAsc = visible.map((d) => { cumulative += d.net_gex; return { ...d, profile: cumulative }; });
+  const chartData = [...withProfileAsc].reverse();
+  const totalNet = sorted.reduce((acc, s) => acc + s.net_gex, 0);
+  const totalGross = sorted.reduce((acc, s) => acc + Math.abs(s.net_gex), 0);
+  const chartHeight = Math.max(360, visible.length * 16);
+  const frameHeight = view === "full" ? 850 : Math.min(680, chartHeight + 20);
 
-  // 決定 Call Wall / Put Wall:優先用傳入值,否則從資料推導
-  const resolvedCallWall =
-    callWall ??
-    sorted.reduce((prev, curr) => (curr.net_gex > prev.net_gex ? curr : prev), sorted[0])?.strike;
-  const resolvedPutWall =
-    putWall ??
-    sorted.reduce((prev, curr) => (curr.net_gex < prev.net_gex ? curr : prev), sorted[0])?.strike;
-
-  // 找最接近各水平線的 strike (Recharts 類別軸需對齊到實際 strike 值)
-  const nearestStrike = (target: number) =>
-    sorted.reduce(
-      (prev, curr) =>
-        Math.abs(curr.strike - target) < Math.abs(prev.strike - target) ? curr : prev,
-      sorted[0]
-    )?.strike;
-
-  const flipStrike = nearestStrike(flipLevel);
-  const spotStrike = nearestStrike(spotPrice);
-
-  const CustomTooltip = ({ active, payload }: any) => {
-    if (active && payload && payload.length) {
-      const d: GexStrikeData & { profile?: number } = payload[0].payload;
-      const isPos = d.net_gex >= 0;
-      return (
-        <div className="bg-[#12161A]/95 border border-white/10 rounded-lg p-3.5 shadow-2xl font-mono text-xs space-y-1 backdrop-blur-md">
-          <div className="text-slate-400 border-b border-white/5 pb-1.5 mb-1.5 flex justify-between items-center gap-6">
-            <span>{isZh ? "行權價 (STRIKE)" : "STRIKE"}</span>
-            <span className="text-white font-bold text-sm">{d.strike}</span>
-          </div>
-          <div className="flex justify-between gap-6">
-            <span className="text-slate-400">{isZh ? "買權 GEX:" : "Call GEX:"}</span>
-            <span className="font-semibold" style={{ color: POS }}>{fmt(d.call_gex)}</span>
-          </div>
-          <div className="flex justify-between gap-6">
-            <span className="text-slate-400">{isZh ? "賣權 GEX:" : "Put GEX:"}</span>
-            <span className="font-semibold" style={{ color: NEG }}>{fmt(d.put_gex)}</span>
-          </div>
-          <div className="flex justify-between gap-6 border-t border-white/5 pt-1.5 mt-1">
-            <span className="text-white font-semibold">{isZh ? "淨 GEX:" : "Net GEX:"}</span>
-            <span className="font-extrabold" style={{ color: isPos ? POS : NEG }}>{fmt(d.net_gex)}</span>
-          </div>
-          {typeof d.profile === "number" && (
-            <div className="flex justify-between gap-6 text-[10px]" style={{ color: PROFILE }}>
-              <span>{isZh ? "累積 Profile:" : "Cumulative:"}</span>
-              <span>{fmt(d.profile)}</span>
-            </div>
-          )}
-          <div className="flex justify-between gap-6 text-[10px] text-slate-500 pt-0.5">
-            <span>{isZh ? "未平倉 (OI):" : "OI:"}</span>
-            <span>{d.oi.toLocaleString()}</span>
-          </div>
-        </div>
-      );
-    }
-    return null;
+  const nearestStrike = (target?: number) => target === undefined ? undefined : visible.reduce((prev, curr) => Math.abs(curr.strike - target) < Math.abs(prev.strike - target) ? curr : prev, visible[0])?.strike;
+  const jumpTo = (target: "top" | "bottom" | "spot" | "flip" | "call" | "put" | "topgex") => {
+    const el = scrollRef.current;
+    if (!el) return;
+    if (target === "top") { el.scrollTop = 0; return; }
+    if (target === "bottom") { el.scrollTop = el.scrollHeight; return; }
+    let strike = spotPrice;
+    if (target === "flip") strike = flipLevel;
+    if (target === "call" && resolvedCallWall) strike = resolvedCallWall;
+    if (target === "put" && resolvedPutWall) strike = resolvedPutWall;
+    if (target === "topgex") strike = [...visible].sort((a, b) => Math.abs(b.net_gex) - Math.abs(a.net_gex))[0]?.strike || spotPrice;
+    const ascendingIndex = visible.findIndex((r) => r.strike >= strike);
+    const reverseIndex = ascendingIndex < 0 ? 0 : visible.length - ascendingIndex - 1;
+    el.scrollTop = Math.max(0, reverseIndex * 16 - el.clientHeight / 2);
   };
 
   const axisFmt = (v: number) => {
@@ -142,182 +89,53 @@ export const GexChart: React.FC<GexChartProps> = ({
     return `${v}`;
   };
 
-  // 圖高度依 strike 檔數動態調整 (每檔約 16px,最少 360)
-  const chartHeight = Math.max(360, sorted.length * 16);
+  const CustomTooltip = ({ active, payload }: any) => {
+    if (!active || !payload?.length) return null;
+    const d: GexStrikeData & { profile?: number } = payload[0].payload;
+    return <div className="bg-[#12161A]/95 border border-white/10 rounded-lg p-3.5 shadow-2xl font-mono text-xs space-y-1 backdrop-blur-md"><div className="text-slate-400 border-b border-white/5 pb-1.5 mb-1.5 flex justify-between items-center gap-6"><span>STRIKE</span><span className="text-white font-bold text-sm">{d.strike}</span></div><LineRow label="Call GEX" value={fmt(d.call_gex)} color={POS} /><LineRow label="Put GEX" value={fmt(d.put_gex)} color={NEG} /><LineRow label="Net GEX" value={fmt(d.net_gex)} color={d.net_gex >= 0 ? POS : NEG} bold /><LineRow label="Cumulative" value={fmt(d.profile || 0)} color={PROFILE} /><div className="text-[10px] text-slate-500 pt-1">OI: {d.oi.toLocaleString()}</div></div>;
+  };
 
   return (
     <div id="gex-chart-container" className="glass-card p-6">
-      {/* Header */}
-      <div className="flex flex-wrap items-center justify-between gap-4 mb-6">
-        <div>
-          <h3 className="font-display font-bold text-sm text-white uppercase tracking-wider">
-            {isZh ? "📊 GEX 敞口分佈 (Gamma Exposure Profile)" : "📊 GEX Profile (Gamma Exposure per Strike)"}
-          </h3>
-          <p className="text-xs text-slate-400 mt-1 leading-relaxed max-w-3xl">
-            {isZh
-              ? "縱軸為行權價、橫軸為 GEX。綠色向右為正 Gamma (莊家 Long，抑制波動);紅色向左為負 Gamma (莊家 Short，助漲助跌)。黃線為累積 GEX Profile。"
-              : "Y-axis = strike, X-axis = GEX. Green (right) = positive gamma; red (left) = negative gamma. Yellow line = cumulative GEX profile."}
-          </p>
-        </div>
-        <div className="flex flex-col gap-1.5 text-[10px] font-mono">
-          <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded" style={{ background: POS }} />
-            <span className="text-slate-300">{isZh ? "正 GEX (Call/Long)" : "Positive GEX"}</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="w-3 h-3 rounded" style={{ background: NEG }} />
-            <span className="text-slate-300">{isZh ? "負 GEX (Put/Short)" : "Negative GEX"}</span>
-          </div>
-          <div className="flex items-center gap-1.5">
-            <div className="w-3 h-0.5" style={{ background: PROFILE }} />
-            <span className="text-slate-300">GEX Profile</span>
-          </div>
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-5">
+        <div><h3 className="font-display font-bold text-sm text-white uppercase tracking-wider">{isZh ? "📊 GEX Profile / Full Chain" : "📊 GEX Profile / Full Chain"}</h3><p className="text-xs text-slate-400 mt-1 leading-relaxed max-w-3xl">{isZh ? "Trade View 預設只看 Spot ±1000；Full Chain 固定高度且內部滾動，不拉爆頁面。" : "Trade View shows Spot ±1000 by default; Full Chain uses internal scrolling."}</p></div>
+        <div className="flex flex-wrap gap-2 text-xs">
+          {(["trade", "top", "full"] as ViewMode[]).map((m) => <button key={m} onClick={() => setView(m)} className={`px-3 py-1.5 rounded border ${view === m ? "bg-[#2DD4A7] text-black border-[#2DD4A7]" : "bg-[#12161A] text-slate-400 border-white/5 hover:text-white"}`}>{m === "trade" ? "Trade View" : m === "top" ? "Top GEX View" : "Full Chain View"}</button>)}
         </div>
       </div>
+      {view === "full" && <div className="flex flex-wrap items-center gap-2 mb-4 text-[11px]"><span className="text-slate-400 mr-1">Filter:</span>{(["all", "oi", "top50", "spot500", "spot1000", "spot1500"] as FilterMode[]).map((f) => <button key={f} onClick={() => setFilter(f)} className={`px-2.5 py-1 rounded border ${filter === f ? "bg-indigo-500 text-white border-indigo-500" : "bg-[#12161A] text-slate-400 border-white/5"}`}>{f === "all" ? "Show All" : f === "oi" ? "OI > 0" : f === "top50" ? "Top 50 abs GEX" : f.replace("spot", "Spot ±")}</button>)}</div>}
+      {view === "full" && <div className="flex flex-wrap gap-2 mb-4 text-[11px]"><span className="text-slate-400 mr-1">Jump:</span>{(["spot", "flip", "call", "put", "topgex", "top", "bottom"] as const).map((j) => <button key={j} onClick={() => jumpTo(j)} className="px-2.5 py-1 rounded border border-white/5 bg-[#12161A] text-slate-300 hover:text-white">{j === "topgex" ? "Top GEX" : j[0].toUpperCase()+j.slice(1)}</button>)}</div>}
 
-      {/* Horizontal chart */}
-      <div className="w-full font-mono text-[10px] select-none" style={{ height: chartHeight }}>
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart
-            layout="vertical"
-            data={withProfile}
-            margin={{ top: 10, right: 60, left: 10, bottom: 10 }}
-          >
-            <CartesianGrid strokeDasharray="3 3" stroke="#1D252C" horizontal={false} />
-
-            {/* X 軸 = GEX 值 (橫向) */}
-            <XAxis
-              type="number"
-              stroke="#64748B"
-              tickLine={false}
-              axisLine={false}
-              tickFormatter={axisFmt}
-              domain={["dataMin", "dataMax"]}
-            />
-
-            {/* Y 軸 = strike (縱向) */}
-            <YAxis
-              type="category"
-              dataKey="strike"
-              stroke="#64748B"
-              tickLine={false}
-              axisLine={false}
-              width={54}
-              interval={Math.max(0, Math.floor(sorted.length / 20))}
-              reversed={false}
-            />
-
-            <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.02)" }} />
-
-            {/* 零軸 */}
-            <ReferenceLine x={0} stroke="#2C3843" strokeWidth={1} />
-
-            {/* Call Resistance 水平線 (紅) */}
-            {resolvedCallWall !== undefined && (
-              <ReferenceLine
-                y={resolvedCallWall}
-                stroke={NEG}
-                strokeWidth={1.5}
-                strokeDasharray="6 4"
-                label={{
-                  value: `${isZh ? "壓力" : "Call Resistance"}: ${resolvedCallWall}`,
-                  position: "right",
-                  fill: NEG,
-                  fontSize: 9,
-                  fontWeight: "bold",
-                }}
-              />
-            )}
-
-            {/* Put Support 水平線 (綠) */}
-            {resolvedPutWall !== undefined && (
-              <ReferenceLine
-                y={resolvedPutWall}
-                stroke={POS}
-                strokeWidth={1.5}
-                strokeDasharray="6 4"
-                label={{
-                  value: `${isZh ? "支撐" : "Put Support"}: ${resolvedPutWall}`,
-                  position: "right",
-                  fill: POS,
-                  fontSize: 9,
-                  fontWeight: "bold",
-                }}
-              />
-            )}
-
-            {/* Gamma Flip / HVL 水平線 (黃) */}
-            {flipStrike !== undefined && (
-              <ReferenceLine
-                y={flipStrike}
-                stroke={FLIP}
-                strokeWidth={1.5}
-                strokeDasharray="4 4"
-                label={{
-                  value: `Flip/HVL: ${flipLevel}`,
-                  position: "left",
-                  fill: FLIP,
-                  fontSize: 9,
-                  fontWeight: "bold",
-                }}
-              />
-            )}
-
-            {/* 現貨水平線 (紫,實線) */}
-            {spotStrike !== undefined && (
-              <ReferenceLine
-                y={spotStrike}
-                stroke={SPOT}
-                strokeWidth={1.5}
-                label={{
-                  value: `Spot: ${spotPrice}`,
-                  position: "left",
-                  fill: SPOT,
-                  fontSize: 9,
-                  fontWeight: "bold",
-                }}
-              />
-            )}
-
-            {/* 橫向 GEX 長條 */}
-            <Bar dataKey="net_gex" barSize={11}>
-              {withProfile.map((entry, idx) => (
-                <Cell key={`c-${idx}`} fill={entry.net_gex >= 0 ? POS : NEG} />
-              ))}
-            </Bar>
-
-            {/* 累積 GEX Profile 曲線 */}
-            <Line
-              type="monotone"
-              dataKey="profile"
-              stroke={PROFILE}
-              strokeWidth={2}
-              dot={false}
-              activeDot={{ r: 4 }}
-            />
-          </ComposedChart>
-        </ResponsiveContainer>
+      <div ref={scrollRef} className="w-full font-mono text-[10px] select-none rounded-lg border border-white/5 bg-[#0F1419]/40" style={{ height: frameHeight, overflowY: view === "full" ? "auto" : "hidden" }}>
+        <div style={{ height: chartHeight }}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart layout="vertical" data={chartData} margin={{ top: 10, right: 70, left: 10, bottom: 10 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1D252C" horizontal={false} />
+              <XAxis type="number" stroke="#64748B" tickLine={false} axisLine={false} tickFormatter={axisFmt} domain={["dataMin", "dataMax"]} />
+              <YAxis type="category" dataKey="strike" stroke="#64748B" tickLine={false} axisLine={false} width={58} interval={Math.max(0, Math.floor(visible.length / 28))} />
+              <Tooltip content={<CustomTooltip />} cursor={{ fill: "rgba(255,255,255,0.02)" }} />
+              <ReferenceLine x={0} stroke="#2C3843" strokeWidth={1} />
+              {resolvedCallWall !== undefined && <ReferenceLine y={nearestStrike(resolvedCallWall)} stroke={NEG} strokeWidth={1.5} strokeDasharray="6 4" label={{ value: `Call Wall: ${resolvedCallWall}`, position: "right", fill: NEG, fontSize: 9, fontWeight: "bold" }} />}
+              {resolvedPutWall !== undefined && <ReferenceLine y={nearestStrike(resolvedPutWall)} stroke={POS} strokeWidth={1.5} strokeDasharray="6 4" label={{ value: `Put Wall: ${resolvedPutWall}`, position: "right", fill: POS, fontSize: 9, fontWeight: "bold" }} />}
+              {visible.length > 0 && <ReferenceLine y={nearestStrike(flipLevel)} stroke={FLIP} strokeWidth={1.5} strokeDasharray="4 4" label={{ value: `Zero Gamma: ${flipLevel}`, position: "left", fill: FLIP, fontSize: 9, fontWeight: "bold" }} />}
+              {visible.length > 0 && <ReferenceLine y={nearestStrike(spotPrice)} stroke={SPOT} strokeWidth={1.5} label={{ value: `Spot: ${spotPrice}`, position: "left", fill: SPOT, fontSize: 9, fontWeight: "bold" }} />}
+              <Bar dataKey="net_gex" barSize={11}>{chartData.map((entry, idx) => <Cell key={`c-${idx}`} fill={entry.net_gex >= 0 ? POS : NEG} />)}</Bar>
+              <Line type="monotone" dataKey="profile" stroke={PROFILE} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
       </div>
-
-      {/* Metric callouts */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4 pt-4 border-t border-white/5 font-mono text-xs">
-        <div className="bg-[#171E24]/60 p-3 rounded border border-white/5 text-center">
-          <span className="text-[9px] text-slate-500 uppercase block mb-1">{isZh ? "壓力 (Call Wall)" : "Call Wall"}</span>
-          <span className="text-sm font-bold" style={{ color: NEG }}>{resolvedCallWall ?? "N/A"}</span>
-        </div>
-        <div className="bg-[#171E24]/60 p-3 rounded border border-white/5 text-center">
-          <span className="text-[9px] text-slate-500 uppercase block mb-1">{isZh ? "支撐 (Put Wall)" : "Put Wall"}</span>
-          <span className="text-sm font-bold" style={{ color: POS }}>{resolvedPutWall ?? "N/A"}</span>
-        </div>
-        <div className="bg-[#171E24]/60 p-3 rounded border border-white/5 text-center">
-          <span className="text-[9px] text-slate-500 uppercase block mb-1">{isZh ? "累計淨 GEX" : "Total Net GEX"}</span>
-          <span className="text-sm font-bold" style={{ color: cumulative >= 0 ? POS : NEG }}>{fmt(cumulative)}</span>
-        </div>
-        <div className="bg-[#171E24]/60 p-3 rounded border border-white/5 text-center">
-          <span className="text-[9px] text-slate-500 uppercase block mb-1">{isZh ? "覆蓋檔位" : "Strikes"}</span>
-          <span className="text-sm font-bold text-slate-200">{sorted.length}</span>
-        </div>
+      <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 mt-4 pt-4 border-t border-white/5 font-mono text-xs">
+        <Metric label="Call Wall" value={resolvedCallWall ?? "N/A"} cls="text-[#EF4444]" />
+        <Metric label="Put Wall" value={resolvedPutWall ?? "N/A"} cls="text-[#22C55E]" />
+        <Metric label="Gamma Flip" value={flipLevel} cls="text-[#F2A93B]" />
+        <Metric label="Total Net GEX" value={fmt(totalNet)} cls={totalNet >= 0 ? "text-[#22C55E]" : "text-[#EF4444]"} />
+        <Metric label="Total Gross GEX" value={fmt(totalGross)} cls="text-slate-200" />
+        <Metric label="Total Strikes" value={sorted.length} cls="text-slate-200" />
+        <Metric label="Visible" value={visible.length} cls="text-slate-200" />
       </div>
     </div>
   );
 };
+function LineRow({ label, value, color, bold=false }: { label: string; value: string; color: string; bold?: boolean }) { return <div className="flex justify-between gap-6"><span className="text-slate-400">{label}:</span><span className={bold ? "font-extrabold" : "font-semibold"} style={{ color }}>{value}</span></div>; }
+function Metric({ label, value, cls }: { label: string; value: string | number; cls: string }) { return <div className="bg-[#171E24]/60 p-3 rounded border border-white/5 text-center"><span className="text-[9px] text-slate-500 uppercase block mb-1">{label}</span><span className={`text-sm font-bold ${cls}`}>{value}</span></div>; }

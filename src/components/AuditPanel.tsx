@@ -1,12 +1,13 @@
 /** Reconciliation ledger built from the actual providers used in a snapshot. */
 import React, { useEffect, useMemo, useState } from "react";
 import { AlertTriangle, Database, RefreshCw, Search, ShieldCheck } from "lucide-react";
-import { DataReconciliation } from "../types";
+import { DailyReport, DataReconciliation } from "../types";
 
 interface AuditPanelProps {
   proxy: string;
   date: string;
   lang?: "zh" | "en";
+  report?: DailyReport | null;
 }
 
 const sourceLabel = (source: string) => {
@@ -18,7 +19,7 @@ const sourceLabel = (source: string) => {
   return labels[source] || source;
 };
 
-export const AuditPanel: React.FC<AuditPanelProps> = ({ proxy, date, lang = "zh" }) => {
+export const AuditPanel: React.FC<AuditPanelProps> = ({ proxy, date, lang = "zh", report }) => {
   const [records, setRecords] = useState<DataReconciliation[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -56,6 +57,43 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ proxy, date, lang = "zh"
   });
   const conflicts = records.filter((record) => record.status === "conflict").length;
   const consensusRate = records.length ? Math.round(((records.length - conflicts) / records.length) * 100) : 0;
+  const cmeAudit = report?.data_mode === "CME_PG40" ? report.cme_audit : null;
+
+  if (cmeAudit) {
+    return (
+      <div id="cme-official-import-audit-panel" className="glass-card p-6">
+        <div className="flex flex-wrap items-start justify-between gap-4 mb-6 border-b border-white/5 pb-5">
+          <div>
+            <h3 className="font-display font-bold text-base text-white flex items-center gap-2">
+              <Database className="w-5 h-5 text-[#2DD4A7]" />
+              {isZh ? "CME 官方資料匯入狀態" : "CME Official Import Status"}
+            </h3>
+            <p className="text-xs text-slate-400 mt-1 max-w-2xl leading-relaxed">
+              {isZh
+                ? "單一官方來源：CME PG40。目前無第二 NQ futures options 來源可做逐合約 OI 比對；NDX proxy 僅用於水位共振，不參與 OI 共識率。"
+                : "Single official source: CME PG40. There is no second NQ futures options source for contract-level OI reconciliation; NDX proxy is confluence only."}
+            </p>
+          </div>
+          <span className="text-[10px] font-mono text-[#2DD4A7] bg-[#2DD4A7]/10 border border-[#2DD4A7]/20 rounded-full px-3 py-1">CME Official EOD</span>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs font-mono">
+          <Metric label="CME trade date" value={cmeAudit.tradeDate} note="Dashboard date matched" tone="good" />
+          <Metric label="Underlying contract" value={cmeAudit.underlyingContract} note="CME futures options" tone="neutral" />
+          <Metric label="Futures settlement" value={String(cmeAudit.futuresSettlement)} note="Black-76 forward" tone="neutral" />
+          <Metric label="Parsed contracts" value={cmeAudit.parsedContractsCount.toLocaleString()} note="PG40 rows" tone="neutral" />
+          <Metric label="Expiry groups" value={String(cmeAudit.expiryGroupsCount)} note="Multi-expiration" tone="neutral" />
+          <Metric label="Total Call OI" value={cmeAudit.totalCallOi.toLocaleString()} note="Official OI" tone="neutral" />
+          <Metric label="Total Put OI" value={cmeAudit.totalPutOi.toLocaleString()} note="Official OI" tone="neutral" />
+          <Metric label="Total Volume" value={cmeAudit.totalVolume.toLocaleString()} note="CME volume" tone="neutral" />
+        </div>
+        <div className="mt-4 grid grid-cols-1 lg:grid-cols-2 gap-3 text-xs font-mono">
+          <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3"><span className="block text-[9px] uppercase text-slate-500 mb-1">PDF hash</span><span className="text-slate-300 break-all">{cmeAudit.pdfHash || "—"}</span></div>
+          <div className="rounded-lg border border-white/5 bg-[#171E24]/60 p-3"><span className="block text-[9px] uppercase text-slate-500 mb-1">Import timestamp / Parser</span><span className="text-slate-300 break-all">{cmeAudit.importTimestamp || "—"} · {cmeAudit.parserVersion || "—"}</span></div>
+        </div>
+        {cmeAudit.warnings?.length > 0 && <div className="mt-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-[11px] text-amber-100 space-y-1">{cmeAudit.warnings.map((w, i) => <div key={i}>• {w}</div>)}</div>}
+      </div>
+    );
+  }
 
   return (
     <div id="reconciliation-audit-panel" className="glass-card p-6">

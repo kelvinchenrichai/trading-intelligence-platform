@@ -2,7 +2,7 @@
  * Minimal server-side Supabase REST store.
  * Keeping this on fetch avoids shipping any database credentials to the browser.
  */
-import { DailyReport, DataReconciliation, MacroData, SourceStatus } from "../types";
+import { DailyReport, DataReconciliation, MacroData, SessionMonitorState, SourceStatus } from "../types";
 import { RawOptionContract } from "../providers/types";
 import { CmeNqImportResult, CmeNqOptionContract, StoredCmeImport } from "../cme/types";
 
@@ -300,17 +300,23 @@ export class SupabaseStore {
     return rows.map((row) => this.mapCmeImport(row));
   }
 
-  /**
-   * 讀取最新一筆 CME 匯入的完整期權合約 (供 GEX 精算)。
-   * 回傳 null 表示尚無 CME 資料 (呼叫端會退回 NDX 近似)。
-   */
-  async getLatestCmeContracts(): Promise<{
+  async getCmeContractsByTradeDate(tradeDate: string): Promise<{
+    id: string;
     tradeDate: string;
+    underlyingContract: string;
     futuresSettlement: number;
+    contractCount: number;
+    fileName: string | null;
+    sha256: string | null;
+    parserVersion: string | null;
+    createdAt: string | null;
+    warnings: string[];
+    summary: any;
     contracts: CmeNqOptionContract[];
   } | null> {
     const imports = await this.request<any[]>("GET", "cme_bulletin_imports", {
-      select: "id,trade_date,futures_settlement",
+      select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,sha256,parser_version,created_at,warnings,summary_json",
+      trade_date: `eq.${tradeDate}`,
       order: "created_at.desc",
       limit: "1",
     });
@@ -343,9 +349,86 @@ export class SupabaseStore {
     }));
 
     return {
+      id: latest.id,
       tradeDate: latest.trade_date,
+      underlyingContract: latest.underlying_contract,
       futuresSettlement: Number(latest.futures_settlement),
+      contractCount: Number(latest.contract_count),
+      fileName: latest.source_file_name ?? null,
+      sha256: latest.sha256 ?? null,
+      parserVersion: latest.parser_version ?? null,
+      createdAt: latest.created_at ?? null,
+      warnings: asObject<string[]>(latest.warnings, []),
+      summary: asObject(latest.summary_json, {} as any),
       contracts,
+    };
+  }
+
+  /** Backward-compatible helper. Prefer getCmeContractsByTradeDate() for strict Dashboard date matching. */
+  async getLatestCmeContracts(): Promise<{
+    tradeDate: string;
+    futuresSettlement: number;
+    contracts: CmeNqOptionContract[];
+  } | null> {
+    const imports = await this.request<any[]>("GET", "cme_bulletin_imports", {
+      select: "trade_date",
+      order: "created_at.desc",
+      limit: "1",
+    });
+    const latest = imports[0];
+    if (!latest) return null;
+    const exact = await this.getCmeContractsByTradeDate(latest.trade_date);
+    return exact ? { tradeDate: exact.tradeDate, futuresSettlement: exact.futuresSettlement, contracts: exact.contracts } : null;
+  }
+
+  async persistTradingViewEvent(payload: any): Promise<void> {
+    await this.request("POST", "tradingview_events", {}, {
+      source: payload.source || "tradingview",
+      symbol: payload.symbol || null,
+      interval: payload.interval || null,
+      event: payload.event,
+      side: payload.side || null,
+      level_type: payload.levelType || payload.level_type || null,
+      level: payload.level === undefined || payload.level === null || payload.level === "" ? null : Number(payload.level),
+      price: payload.price === undefined || payload.price === null || payload.price === "" ? null : Number(payload.price),
+      model_date: payload.modelDate || payload.model_date || null,
+      underlying: payload.underlying || null,
+      data_mode: payload.dataMode || payload.data_mode || null,
+      payload_json: payload,
+    }, "return=minimal");
+  }
+
+  async getTradingViewEvents(modelDate: string, underlying?: string, limit = 100): Promise<any[]> {
+    return this.request<any[]>("GET", "tradingview_events", {
+      select: "received_at,source,symbol,interval,event,side,level_type,level,price,model_date,underlying,data_mode,payload_json",
+      model_date: `eq.${modelDate}`,
+      ...(underlying ? { underlying: `eq.${underlying}` } : {}),
+      order: "received_at.desc",
+      limit: String(limit),
+    });
+  }
+
+  async getTradingViewSessionState(modelDate: string, underlying?: string): Promise<SessionMonitorState> {
+    const events = await this.getTradingViewEvents(modelDate, underlying, 200);
+    const names = new Set(events.map((e) => e.event));
+    const latest = events[0];
+    let currentSessionRegime: SessionMonitorState["currentSessionRegime"] = "No Edge";
+    if (names.has("CALL_WALL_BREAKOUT_2X5M") || names.has("WALL_FLIPPED_SUPPORT") || names.has("BOS_UP")) currentSessionRegime = "Expansion Up";
+    else if (names.has("PUT_WALL_BREAKDOWN_2X5M") || names.has("WALL_FLIPPED_RESISTANCE") || names.has("BOS_DOWN")) currentSessionRegime = "Expansion Down";
+    else if (names.has("CALL_WALL_TOUCH") || names.has("PUT_WALL_TOUCH")) currentSessionRegime = "Consolidation / Pin";
+    else if (names.has("GAMMA_FLIP_TOUCH") || names.has("GAMMA_FLIP_RECLAIM") || names.has("GAMMA_FLIP_REJECT")) currentSessionRegime = "Neutral / Wait";
+    return {
+      lastEvent: latest?.event || null,
+      gammaFlipTouched: names.has("GAMMA_FLIP_TOUCH"),
+      gammaFlipReclaimed: names.has("GAMMA_FLIP_RECLAIM"),
+      callWallTouched: names.has("CALL_WALL_TOUCH"),
+      callWallBreakoutConfirmed: names.has("CALL_WALL_BREAKOUT_2X5M"),
+      putWallTouched: names.has("PUT_WALL_TOUCH"),
+      putWallBreakdownConfirmed: names.has("PUT_WALL_BREAKDOWN_2X5M"),
+      wallFlipped: names.has("WALL_FLIPPED_SUPPORT") ? "support" : names.has("WALL_FLIPPED_RESISTANCE") ? "resistance" : null,
+      currentSessionRegime,
+      explanation: events.length ? "TradingView webhook events received and reduced into deterministic session state." : "No TradingView webhook events received for this model date yet.",
+      updatedAt: latest?.received_at || null,
     };
   }
 
