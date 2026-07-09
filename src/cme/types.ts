@@ -54,6 +54,8 @@ export interface StoredCmeImport {
   contractCount: number;
   fileName: string;
   createdAt: string;
+  parserVersion?: string | null;
+  sha256?: string | null;
   warnings: string[];
   summary: Omit<CmeNqImportResult, "contracts" | "fileName" | "sha256">;
 }

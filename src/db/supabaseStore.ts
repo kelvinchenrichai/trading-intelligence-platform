@@ -30,6 +30,7 @@ export interface StoredRefresh {
 }
 
 const CHUNK_SIZE = 500;
+const PREFERRED_CME_PARSER_VERSION = "cme-pg40-v0.2.0-full-expiry-resolver";
 
 function chunks<T>(input: T[], size = CHUNK_SIZE): T[][] {
   const result: T[][] = [];
@@ -235,7 +236,7 @@ export class SupabaseStore {
     return refreshRunId;
   }
 
-  async persistCmeImport(payload: CmeNqImportResult): Promise<StoredCmeImport> {
+  async persistCmeImport(payload: CmeNqImportResult, options: { force?: boolean } = {}): Promise<StoredCmeImport> {
     const summary = {
       tradeDate: payload.tradeDate,
       bulletinDateText: payload.bulletinDateText,
@@ -246,14 +247,24 @@ export class SupabaseStore {
       expirySummaries: payload.expirySummaries,
       warnings: payload.warnings,
     };
-    const existing = await this.request<any[]>("GET", "cme_bulletin_imports", {
-      select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,created_at,warnings,summary_json",
-      sha256: `eq.${payload.sha256}`,
-      limit: "1",
-    });
-    if (existing[0]) return this.mapCmeImport(existing[0]);
+    if (!options.force) {
+      const existing = await this.request<any[]>("GET", "cme_bulletin_imports", {
+        select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,sha256,parser_version,created_at,warnings,summary_json",
+        sha256: `eq.${payload.sha256}`,
+        parser_version: `eq.${payload.parserVersion}`,
+        limit: "1",
+      });
+      if (existing[0]) return this.mapCmeImport(existing[0]);
+    } else {
+      // Force reparse replaces the same PDF + same parser-version import.
+      // The FK on cme_nq_option_contracts is ON DELETE CASCADE, so contracts are also cleared.
+      await this.request("DELETE", "cme_bulletin_imports", {
+        sha256: `eq.${payload.sha256}`,
+        parser_version: `eq.${payload.parserVersion}`,
+      }, undefined, "return=minimal");
+    }
 
-    const rows = await this.request<any[]>("POST", "cme_bulletin_imports", { select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,created_at,warnings,summary_json" }, {
+    const rows = await this.request<any[]>("POST", "cme_bulletin_imports", { select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,sha256,parser_version,created_at,warnings,summary_json" }, {
       trade_date: payload.tradeDate,
       bulletin_date_text: payload.bulletinDateText,
       source_file_name: payload.fileName,
@@ -293,7 +304,7 @@ export class SupabaseStore {
 
   async listCmeImports(): Promise<StoredCmeImport[]> {
     const rows = await this.request<any[]>("GET", "cme_bulletin_imports", {
-      select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,created_at,warnings,summary_json",
+      select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,sha256,parser_version,created_at,warnings,summary_json",
       order: "created_at.desc",
       limit: "30",
     });
@@ -318,9 +329,9 @@ export class SupabaseStore {
       select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,sha256,parser_version,created_at,warnings,summary_json",
       trade_date: `eq.${tradeDate}`,
       order: "created_at.desc",
-      limit: "1",
+      limit: "20",
     });
-    const latest = imports[0];
+    const latest = imports.find((row) => row.parser_version === PREFERRED_CME_PARSER_VERSION) || imports[0];
     if (!latest) return null;
 
     const rows = await this.request<any[]>("GET", "cme_nq_option_contracts", {
@@ -442,6 +453,8 @@ export class SupabaseStore {
       contractCount: Number(row.contract_count),
       fileName: row.source_file_name,
       createdAt: row.created_at,
+      parserVersion: row.parser_version ?? summary?.parserVersion ?? null,
+      sha256: row.sha256 ?? null,
       warnings: asObject<string[]>(row.warnings, []),
       summary,
     };

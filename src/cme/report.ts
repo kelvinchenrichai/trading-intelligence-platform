@@ -189,7 +189,7 @@ export function buildCmeAuditStatus(cme: CmeImportWithContracts) {
     importTimestamp: cme.createdAt || null,
     parserVersion: cme.parserVersion || cme.summary?.parserVersion || null,
     warnings: cme.warnings || [],
-    duplicateStatus: "sha256 unique import guard enabled",
+    duplicateStatus: "sha256 + parser_version import guard enabled",
   };
 }
 
@@ -265,15 +265,14 @@ export function buildPlaybook(report: DailyReport): PlaybookOutput {
     };
   }
   if (report.gamma.status === "negative") {
-    const down = spot < flip;
     return {
-      bias: down ? "Expansion Down" : "Expansion Up",
-      favor: down ? "反彈不回 Put Wall / Flip 上方時，優先觀察下方支撐反應。" : "突破後回測不跌回 Call Wall 下方時，優先觀察上方延伸。",
-      avoid: "不要在第一根急漲急跌後直接追；等待 2×5m close 與 AVWAP / BOS 確認。",
-      trigger: down ? "2×5m close below Put Wall + BOS_DOWN。" : "2×5m close above Call Wall + BOS_UP。",
-      invalidation: down ? "收回 Put Wall 或 Flip 上方。" : "收回 Call Wall 或 Flip 下方。",
-      keyLevels: [{ label: "Put Wall", level: putWall }, { label: "Call Wall", level: callWall }, { label: "Expected Move Low", level: report.price.expected_move.low }, { label: "Expected Move High", level: report.price.expected_move.high }],
-      confidence: report.data_confidence,
+      bias: "Negative GEX / Wait",
+      favor: "Negative GEX 代表破位後容易放大，但方向必須由盤中價格確認；先觀察 HVL / Gamma Flip、Call Wall、Put Wall 的收盤確認。",
+      avoid: "不要把 Negative GEX 直接解讀成單邊看空或看多；等待 2×5m close、BOS、VWAP / AVWAP 確認後再判斷擴張方向。",
+      trigger: "下方：2×5m close below Put Wall + BOS_DOWN。上方：2×5m close above Call Wall + BOS_UP。",
+      invalidation: "價格反覆穿越 Gamma Flip / HVL，且沒有站到 Call/Put Wall 外側，視為 chop / no edge。",
+      keyLevels: [{ label: "Gamma Flip / HVL", level: flip }, { label: "Put Wall", level: putWall }, { label: "Call Wall", level: callWall }, { label: "Expected Move Low", level: report.price.expected_move.low }, { label: "Expected Move High", level: report.price.expected_move.high }],
+      confidence: report.data_confidence === "high" ? "medium" : report.data_confidence,
       warnings,
     };
   }

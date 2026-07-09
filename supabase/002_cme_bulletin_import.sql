@@ -6,7 +6,7 @@ create table if not exists public.cme_bulletin_imports (
   trade_date date not null,
   bulletin_date_text text not null,
   source_file_name text not null,
-  sha256 text not null unique,
+  sha256 text not null,
   parser_version text not null,
   underlying_contract text not null,
   futures_settlement numeric not null,
@@ -39,6 +39,7 @@ create table if not exists public.cme_nq_option_contracts (
   unique (import_id, option_family, expiry_label, option_type, strike, source_page)
 );
 
+create unique index if not exists cme_bulletin_imports_sha256_parser_version_uq on public.cme_bulletin_imports(sha256, parser_version);
 create index if not exists cme_bulletin_imports_trade_date_idx on public.cme_bulletin_imports(trade_date desc);
 create index if not exists cme_nq_option_contracts_import_idx on public.cme_nq_option_contracts(import_id, expiry_date, strike);
 create index if not exists cme_nq_option_contracts_trade_date_idx on public.cme_nq_option_contracts(trade_date desc, underlying_contract);

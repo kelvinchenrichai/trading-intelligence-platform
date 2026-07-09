@@ -4,6 +4,7 @@ const exactZh: Record<string, string> = {
   "CME PDF is user-uploaded; this platform does not automatically download or scrape CME data.": "CME PDF 需由使用者自行上傳；本平台不會自動下載或爬取 CME 資料。",
   "Weekly/daily expiry dates are model estimates until an exact contract-calendar resolver is validated. Do not treat preliminary gamma metrics as final trading signals.": "週到期 / 日到期日期目前是模型估算，直到精確合約日曆解析器驗證完成前，不要把初步 gamma 指標視為最終交易訊號。",
   "This first importer stores CME OI, settlement, volume, and CME-published delta. Black-76 GEX calibration is intentionally a separate validation step.": "此版匯入器會保存 CME OI、settlement、volume 與 CME 公布的 delta；Black-76 GEX 校準刻意作為獨立驗證步驟處理。",
+  "CME PG40 v5 parser stores CME OI, settlement, volume, CME-published delta, and full-expiry audit rows. Black-76 GEX and comparable display calibration are computed after import.": "CME PG40 v5 parser 會保存 CME OI、settlement、volume、CME 公布的 delta 與完整到期日 audit rows；Black-76 GEX 與 comparable display calibration 會在匯入後計算。",
   "Session Flow unavailable — currently using CME EOD OI baseline until TradingView webhook events arrive.": "Session Flow 尚未啟用；目前使用 CME EOD OI 盤前基準，等待 TradingView webhook 事件進來後才會更新盤中狀態。",
   "Session Flow unavailable — currently using CME EOD OI baseline.": "Session Flow 尚未啟用；目前使用 CME EOD OI 盤前基準。",
   "Session Flow unavailable — currently using EOD OI baseline.": "Session Flow 尚未啟用；目前使用 EOD OI 盤前基準。",
@@ -16,6 +17,7 @@ const exactZh: Record<string, string> = {
   "IV / source coverage is not high; keep confidence reduced.": "IV / 資料覆蓋率不是高信心，請降低解讀信心。",
   "This is proxy fallback, not CME official NQ futures options OI.": "目前是 Proxy 備援，不是 CME 官方 NQ futures options OI。",
   "sha256 unique import guard enabled": "已啟用 sha256 重複匯入保護",
+  "sha256 + parser_version import guard enabled": "已啟用 sha256 + parser_version 重複匯入保護",
   "Unavailable": "尚不可用",
   "Session unavailable": "Session 狀態尚不可用",
   "Supabase is not connected; TradingView session events cannot be loaded yet.": "尚未連接 Supabase，TradingView 盤中事件暫時無法讀取。",
@@ -102,7 +104,7 @@ export function translateText(input: string | null | undefined, lang: UiLang): s
   if (statusZh[input]) return statusZh[input];
 
   const iv = input.match(/^CME Black-76 futures-options engine used with NQ multiplier 20\. IV reconstructed ([0-9.]+)%\.$/);
-  if (iv) return `使用 CME Black-76 期貨期權引擎，NQ multiplier = 20；已反解 IV 約 ${iv[1]}%。`;
+  if (iv) return `使用 CME Black-76 期貨期權引擎，NQ multiplier = 20；IV 重建覆蓋率約 ${iv[1]}%。`;
 
   const proxy = input.match(/^(.+) \/ proxy levels are for confluence only and are not CME futures options OI consensus\.$/);
   if (proxy) return `${proxy[1]} / proxy 僅用於價位共振，不是 CME futures options 的 OI 共識。`;

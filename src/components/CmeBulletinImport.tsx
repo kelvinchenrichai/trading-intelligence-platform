@@ -8,6 +8,7 @@ export function CmeBulletinImport({ onImported }: Props) {
   const [file, setFile] = useState<File | null>(null);
   const [token, setToken] = useState("");
   const [loading, setLoading] = useState(false);
+  const [forceReparse, setForceReparse] = useState(false);
   const [message, setMessage] = useState<{ type: "ok" | "error"; text: string } | null>(null);
   const [imports, setImports] = useState<StoredCmeImport[]>([]);
 
@@ -31,10 +32,10 @@ export function CmeBulletinImport({ onImported }: Props) {
     setLoading(true);
     setMessage(null);
     try {
-      const response = await fetch("/api/cme/import", { method: "POST", headers: { "x-refresh-token": token.trim() }, body: form });
+      const response = await fetch(`/api/cme/import${forceReparse ? "?force=true" : ""}`, { method: "POST", headers: { "x-refresh-token": token.trim() }, body: form });
       const result = await response.json();
       if (!response.ok) throw new Error(result.error || "CME import failed.");
-      setMessage({ type: "ok", text: `已解析並保存 ${result.contractCount.toLocaleString()} 筆 NQ options rows；資料日：${result.tradeDate}。` });
+      setMessage({ type: "ok", text: `已解析並保存 ${result.contractCount.toLocaleString()} 筆 NQ options rows；資料日：${result.tradeDate}；parser：${result.parserVersion || result.summary?.parserVersion || "—"}。` });
       setFile(null);
       await loadImports();
       onImported?.();
@@ -67,6 +68,10 @@ export function CmeBulletinImport({ onImported }: Props) {
           <span className="text-xs text-slate-400">Private Refresh Token（不保存於伺服器／GitHub）</span>
           <input className="mt-1 block w-full rounded-lg border border-white/10 bg-black/20 px-3 py-2 text-sm" type="password" value={token} onChange={(e) => setToken(e.target.value)} placeholder="你的 REFRESH_API_TOKEN" autoComplete="off" />
         </label>
+        <label className="flex items-center gap-2 text-xs text-slate-300 md:col-span-2">
+          <input type="checkbox" checked={forceReparse} onChange={(e) => setForceReparse(e.target.checked)} />
+          Force reparse：同一份 PDF 也強制用目前 parser 重新匯入
+        </label>
         <button disabled={loading} className="rounded-lg bg-cyan-300 text-slate-950 px-5 py-2.5 font-semibold text-sm disabled:opacity-60 flex gap-2 items-center justify-center">
           {loading ? <LoaderCircle className="w-4 h-4 animate-spin" /> : <FileUp className="w-4 h-4" />} {loading ? "解析與保存中" : "上傳並匯入"}
         </button>
@@ -75,7 +80,7 @@ export function CmeBulletinImport({ onImported }: Props) {
 
       <div className="mt-8">
         <h3 className="font-semibold flex items-center gap-2"><Database className="w-4 h-4 text-cyan-300" />已匯入 CME 資料</h3>
-        {!imports.length ? <p className="text-sm text-slate-500 mt-3">尚未匯入任何 CME PG40 PDF。</p> : <div className="mt-3 overflow-x-auto"><table className="min-w-full text-sm"><thead className="text-left text-slate-500"><tr><th className="pb-2 pr-5">Trade date</th><th className="pb-2 pr-5">Underlying</th><th className="pb-2 pr-5">Settlement</th><th className="pb-2 pr-5">Rows</th><th className="pb-2">File</th></tr></thead><tbody>{imports.map((item) => <tr key={item.id} className="border-t border-white/5 text-slate-200"><td className="py-2 pr-5 font-mono">{item.tradeDate}</td><td className="py-2 pr-5 font-mono">{item.underlyingContract}</td><td className="py-2 pr-5">{item.futuresSettlement.toLocaleString()}</td><td className="py-2 pr-5">{item.contractCount.toLocaleString()}</td><td className="py-2 text-slate-400 truncate max-w-[22rem]">{item.fileName}</td></tr>)}</tbody></table></div>}
+        {!imports.length ? <p className="text-sm text-slate-500 mt-3">尚未匯入任何 CME PG40 PDF。</p> : <div className="mt-3 overflow-x-auto"><table className="min-w-full text-sm"><thead className="text-left text-slate-500"><tr><th className="pb-2 pr-5">Trade date</th><th className="pb-2 pr-5">Parser</th><th className="pb-2 pr-5">Underlying</th><th className="pb-2 pr-5">Settlement</th><th className="pb-2 pr-5">Rows</th><th className="pb-2">File</th></tr></thead><tbody>{imports.map((item) => <tr key={item.id} className="border-t border-white/5 text-slate-200"><td className="py-2 pr-5 font-mono">{item.tradeDate}</td><td className="py-2 pr-5 font-mono text-cyan-200">{item.parserVersion || item.summary?.parserVersion || "—"}</td><td className="py-2 pr-5 font-mono">{item.underlyingContract}</td><td className="py-2 pr-5">{item.futuresSettlement.toLocaleString()}</td><td className="py-2 pr-5">{item.contractCount.toLocaleString()}</td><td className="py-2 text-slate-400 truncate max-w-[22rem]">{item.fileName}</td></tr>)}</tbody></table></div>}
       </div>
     </div>
   </section>;

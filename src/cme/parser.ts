@@ -338,7 +338,7 @@ export async function parseCmeSection40(pdfBuffer: Buffer, fileName: string): Pr
   const warnings = [
     "CME PDF is user-uploaded; this platform does not automatically download or scrape CME data.",
     "Weekly/daily expiry dates are model estimates until an exact contract-calendar resolver is validated. Do not treat preliminary gamma metrics as final trading signals.",
-    "This first importer stores CME OI, settlement, volume, and CME-published delta. Black-76 GEX calibration is intentionally a separate validation step.",
+    "CME PG40 v5 parser stores CME OI, settlement, volume, CME-published delta, and full-expiry audit rows. Black-76 GEX and comparable display calibration are computed after import.",
   ];
   return {
     tradeDate: bulletin.date,

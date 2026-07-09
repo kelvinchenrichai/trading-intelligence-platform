@@ -141,9 +141,19 @@ async function startServer() {
     if (!cmeImports.configured) return res.status(503).json({ error: "Supabase is required before importing a CME bulletin.", code: "CME_STORE_NOT_CONFIGURED" });
     if (!req.file?.buffer) return res.status(400).json({ error: "Missing PDF file field 'bulletin'.", code: "CME_FILE_MISSING" });
     try {
+      const force = req.query.force === "true";
       const parsed = await parseCmeSection40(req.file.buffer, req.file.originalname);
-      const stored = await cmeImports.persist(parsed);
-      return res.status(201).json({ ...stored, tradeDate: parsed.tradeDate, contractCount: parsed.contractCount, expirySummaries: parsed.expirySummaries, warnings: parsed.warnings });
+      const stored = await cmeImports.persist(parsed, { force });
+      return res.status(201).json({
+        ...stored,
+        tradeDate: parsed.tradeDate,
+        contractCount: parsed.contractCount,
+        parserVersion: parsed.parserVersion,
+        sha256: parsed.sha256,
+        expirySummaries: parsed.expirySummaries,
+        warnings: parsed.warnings,
+        forceReparse: force,
+      });
     } catch (error: any) {
       console.error("[cme-import]", error?.message || error);
       return res.status(422).json({ error: error?.message || "CME PDF could not be parsed.", code: "CME_PARSE_FAILED" });
