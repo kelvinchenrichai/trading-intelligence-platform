@@ -17,6 +17,7 @@ import { analyzeMarketStructure } from "../utils/engine";
 import { fetchFuturesBasis, applyBasisToReport } from "../providers/futuresBasis";
 import { computeCmeGex } from "../cme/cmeGex";
 import { analyzeCmeResolved, buildCmeAuditStatus, buildCmeExpiryBreakdown, buildConfluence, buildDefaultSessionMonitor, buildPlaybook, buildTradingViewPayloads } from "../cme/report";
+import type { CmeImportWithContracts } from "../cme/report";
 import { SupabaseStore } from "./supabaseStore";
 
 export interface RealDatabaseConfig {
@@ -127,12 +128,22 @@ export class RealMarketDatabase {
   }
 
   public async getDailyReport(instrument: string, date?: string): Promise<DailyReport | null> {
+    const normalizedInstrument = instrument.toUpperCase();
+
+    // CME PG40 imports are authoritative for NQ and may be uploaded independently of
+    // the MarketData refresh job. Therefore the dashboard must be able to render the
+    // latest CME import directly instead of waiting for a new daily_reports row.
+    if (normalizedInstrument === "NQ") {
+      const cmeReport = await this.getCmeOfficialReport(date);
+      if (cmeReport) return cmeReport;
+    }
+
     if (this.config.store && !this.config.store.lastError) {
-      const stored = await this.config.store.getReport(instrument, date);
+      const stored = await this.config.store.getReport(normalizedInstrument, date);
       if (stored) return stored;
     }
     const targetDate = date || Object.keys(this.dailyReports).sort().at(-1);
-    return targetDate ? this.dailyReports[targetDate]?.find((report) => report.instrument === instrument) || null : null;
+    return targetDate ? this.dailyReports[targetDate]?.find((report) => report.instrument === normalizedInstrument) || null : null;
   }
 
   public async getHistory(instrument: string) {
@@ -170,6 +181,94 @@ export class RealMarketDatabase {
       put_wall_1: report.gamma.put_walls[0]?.strike,
       confidence: report.data_confidence,
     };
+  }
+
+
+  private async getCmeOfficialReport(date?: string): Promise<DailyReport | null> {
+    if (!this.config.store || this.config.store.lastError) return null;
+    try {
+      const cmeData = date
+        ? await this.config.store.getCmeContractsByTradeDate(date)
+        : await this.config.store.getLatestCmeContractsByTradeDate();
+      if (!cmeData || !cmeData.contracts.length || cmeData.futuresSettlement <= 0) return null;
+
+      let proxyReport: DailyReport | null = null;
+      try {
+        const storedProxyCandidate = await this.config.store.getReport("NQ", cmeData.tradeDate);
+        // Use stored proxy data only as Layer 2 confluence. If that row is already a
+        // CME report, do not compare CME against itself.
+        if (storedProxyCandidate && storedProxyCandidate.data_mode !== "CME_PG40") {
+          proxyReport = storedProxyCandidate;
+        }
+      } catch {
+        proxyReport = null;
+      }
+
+      return this.buildCmeOfficialReport(cmeData, cmeData.tradeDate, proxyReport);
+    } catch (error: any) {
+      console.warn(`[cme-dashboard] Unable to build CME dashboard report: ${error?.message || error}`);
+      return null;
+    }
+  }
+
+  private buildCmeOfficialReport(cmeData: CmeImportWithContracts, dashboardDate: string, proxyReport?: DailyReport | null): DailyReport {
+    const latestMacro = this.macroData[0];
+    const macro = proxyReport?.macro || (latestMacro ? {
+      VIX: latestMacro.vix,
+      DXY: latestMacro.dxy,
+      US10Y: latestMacro.us10y,
+    } : { VIX: 0, DXY: 0, US10Y: 4.0 });
+
+    const cme = computeCmeGex(cmeData.contracts, cmeData.futuresSettlement);
+    const cmeConfidence: "high" | "medium" | "low" =
+      cme.ivReconstructedPct >= 70 ? "high" : cme.ivReconstructedPct >= 40 ? "medium" : "low";
+    const cmeReport = analyzeCmeResolved(
+      cmeData.underlyingContract,
+      cmeData.tradeDate,
+      cmeData.futuresSettlement,
+      cme.resolved,
+      cmeConfidence,
+      macro,
+    );
+    const { expiryBreakdown, selectedPanels } = buildCmeExpiryBreakdown(cmeData, cme.resolved, cmeConfidence, macro);
+
+    cmeReport.data_mode = "CME_PG40";
+    cmeReport.primary_source = "CME PG40 Official EOD";
+    cmeReport.source_status = {
+      currentModel: "CME Official EOD Map",
+      dataMode: "CME_PG40",
+      primarySource: "CME PG40 Official EOD",
+      dashboardDate,
+      cmeTradeDate: cmeData.tradeDate,
+      cmeImportId: cmeData.id,
+      cmeUnderlying: cmeData.underlyingContract,
+      cmeFuturesSettlement: cmeData.futuresSettlement,
+      cmeImportTimestamp: cmeData.createdAt || null,
+      cmeContractsParsed: cmeData.contracts.length,
+      cmeExpiryGroups: expiryBreakdown.length,
+      fallbackUsed: false,
+      fallbackReason: null,
+      sourceWarnings: [
+        ...cmeData.warnings,
+        `CME Black-76 futures-options engine used with NQ multiplier 20. IV reconstruction coverage ${cme.ivReconstructedPct}%.`,
+        "CME PG40 was user-uploaded and is rendered directly from the selected import; it is not live intraday options flow.",
+        ...(proxyReport ? ["NDX proxy snapshot is retained only as Layer 2 confluence, not as CME futures options OI consensus."] : ["No same-date NDX proxy refresh row was available; dashboard is showing Layer 1 CME PG40 only."]),
+      ],
+      proxy: {
+        instrument: "NDX",
+        snapshotDate: proxyReport?.as_of?.slice(0, 10) || null,
+        available: Boolean(proxyReport),
+      },
+      sessionFlow: { available: false, note: "Session Flow unavailable — currently using CME EOD OI baseline until TradingView webhook events arrive." },
+    };
+    cmeReport.cme_audit = buildCmeAuditStatus(cmeData);
+    cmeReport.expiry_breakdown = expiryBreakdown;
+    cmeReport.selected_expiry_panels = selectedPanels;
+    cmeReport.tradingview_payloads = buildTradingViewPayloads(cmeReport);
+    cmeReport.session_monitor = buildDefaultSessionMonitor(cmeReport);
+    cmeReport.playbook = buildPlaybook(cmeReport);
+    if (proxyReport) cmeReport.confluence = buildConfluence(cmeReport, proxyReport);
+    return cmeReport;
   }
 
   public async refresh(): Promise<RefreshResult> {

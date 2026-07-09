@@ -102,8 +102,29 @@ async function startServer() {
   const database = await buildDatabase();
   const cmeImports = new CmeImportService(SupabaseStore.fromEnvironment());
 
-  app.get("/api/health", (_req, res) => {
+  app.get("/api/health", async (_req, res) => {
     const status = database.getStatus();
+    try {
+      const imports = await cmeImports.list();
+      const latestCme = [...imports].sort((a, b) => {
+        const dateCmp = String(b.tradeDate || "").localeCompare(String(a.tradeDate || ""));
+        if (dateCmp !== 0) return dateCmp;
+        const aPreferred = a.parserVersion === "cme-pg40-v0.2.0-full-expiry-resolver" ? 1 : 0;
+        const bPreferred = b.parserVersion === "cme-pg40-v0.2.0-full-expiry-resolver" ? 1 : 0;
+        if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+        return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
+      })[0];
+      if (latestCme?.tradeDate && (!status.latestSnapshotDate || latestCme.tradeDate >= status.latestSnapshotDate)) {
+        status.latestSnapshotDate = latestCme.tradeDate;
+        status.latestSnapshotTimestamp = latestCme.createdAt || status.latestSnapshotTimestamp;
+        status.warnings = [
+          ...status.warnings,
+          `Latest dashboard baseline is CME PG40 import ${latestCme.tradeDate} (${latestCme.parserVersion || "unknown parser"}).`,
+        ];
+      }
+    } catch (error: any) {
+      status.warnings = [...status.warnings, `CME import status unavailable: ${error?.message || error}`];
+    }
     const code = status.service === "error" ? 503 : 200;
     res.status(code).json(status);
   });

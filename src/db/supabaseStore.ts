@@ -48,6 +48,19 @@ function queryString(params: Record<string, string | undefined>): string {
   return query.toString();
 }
 
+function selectPreferredCmeImport(rows: any[]): any | null {
+  if (!rows.length) return null;
+  const sorted = [...rows].sort((a, b) => {
+    const dateCmp = String(b.trade_date || "").localeCompare(String(a.trade_date || ""));
+    if (dateCmp !== 0) return dateCmp;
+    const aPreferred = a.parser_version === PREFERRED_CME_PARSER_VERSION ? 1 : 0;
+    const bPreferred = b.parser_version === PREFERRED_CME_PARSER_VERSION ? 1 : 0;
+    if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+    return String(b.created_at || "").localeCompare(String(a.created_at || ""));
+  });
+  return sorted[0];
+}
+
 export class SupabaseStore {
   private url: string;
   private secretKey: string;
@@ -375,20 +388,38 @@ export class SupabaseStore {
     };
   }
 
+
+  async getLatestCmeContractsByTradeDate(): Promise<{
+    id: string;
+    tradeDate: string;
+    underlyingContract: string;
+    futuresSettlement: number;
+    contractCount: number;
+    fileName: string | null;
+    sha256: string | null;
+    parserVersion: string | null;
+    createdAt: string | null;
+    warnings: string[];
+    summary: any;
+    contracts: CmeNqOptionContract[];
+  } | null> {
+    const imports = await this.request<any[]>("GET", "cme_bulletin_imports", {
+      select: "id,trade_date,underlying_contract,futures_settlement,contract_count,source_file_name,sha256,parser_version,created_at,warnings,summary_json",
+      order: "trade_date.desc,created_at.desc",
+      limit: "50",
+    });
+    const latest = selectPreferredCmeImport(imports);
+    if (!latest?.trade_date) return null;
+    return this.getCmeContractsByTradeDate(latest.trade_date);
+  }
+
   /** Backward-compatible helper. Prefer getCmeContractsByTradeDate() for strict Dashboard date matching. */
   async getLatestCmeContracts(): Promise<{
     tradeDate: string;
     futuresSettlement: number;
     contracts: CmeNqOptionContract[];
   } | null> {
-    const imports = await this.request<any[]>("GET", "cme_bulletin_imports", {
-      select: "trade_date",
-      order: "created_at.desc",
-      limit: "1",
-    });
-    const latest = imports[0];
-    if (!latest) return null;
-    const exact = await this.getCmeContractsByTradeDate(latest.trade_date);
+    const exact = await this.getLatestCmeContractsByTradeDate();
     return exact ? { tradeDate: exact.tradeDate, futuresSettlement: exact.futuresSettlement, contracts: exact.contracts } : null;
   }
 

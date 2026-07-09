@@ -616,7 +616,7 @@ export default function App() {
           isAdmin ? (
             <div className="space-y-6">
               <CmeDownloadLinks lang={lang} />
-              <CmeBulletinImport onImported={loadStatus} />
+              <CmeBulletinImport onImported={async () => { await loadStatus(); await fetchReport(activeInst, ""); setActivePage("dashboard"); }} />
             </div>
           ) : (
             <div className="glass-card p-10 flex flex-col items-center justify-center text-center gap-4">
