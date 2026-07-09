@@ -336,32 +336,42 @@ export function analyzeMarketStructure(
   // If enabled, prefer resistance above spot and support below spot; this mirrors
   // how desks use Call Resistance / Put Support for the trading map.
   const decisionStrikes = gexStrikes.filter((s) => s.strike >= decisionMin && s.strike <= decisionMax);
-  const positiveInWindow = decisionStrikes.filter((s) => s.net_gex > 0);
-  const negativeInWindow = decisionStrikes.filter((s) => s.net_gex < 0);
-  const callUniverse = options.preferDirectionalWalls
-    ? positiveInWindow.filter((s) => s.strike >= lastPrice)
-    : positiveInWindow;
-  const putUniverse = options.preferDirectionalWalls
-    ? negativeInWindow.filter((s) => s.strike <= lastPrice)
-    : negativeInWindow;
 
-  const sortedByGexDesc = (callUniverse.length ? callUniverse : positiveInWindow.length ? positiveInWindow : decisionStrikes)
+  // Headline walls must behave like trading levels:
+  // - Call Wall / resistance should be above current futures price.
+  // - Put Wall / support should be below current futures price.
+  // Use option-type-specific exposure instead of net_gex.  A large ITM put above
+  // spot can dominate net_gex, but it should not become the headline Put Support.
+  const windowForWalls = decisionStrikes.length ? decisionStrikes : gexStrikes;
+  const callCandidates = windowForWalls
+    .filter((s) => s.call_gex > 0 && (!options.preferDirectionalWalls || s.strike >= lastPrice))
     .slice()
-    .sort((a, b) => b.net_gex - a.net_gex || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
-  const sortedByGexAsc = (putUniverse.length ? putUniverse : negativeInWindow.length ? negativeInWindow : decisionStrikes)
+    .sort((a, b) => b.call_gex - a.call_gex || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
+  const putCandidates = windowForWalls
+    .filter((s) => s.put_gex < 0 && (!options.preferDirectionalWalls || s.strike <= lastPrice))
     .slice()
-    .sort((a, b) => a.net_gex - b.net_gex || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
+    .sort((a, b) => a.put_gex - b.put_gex || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
 
-  const nearestActualStrikes = (decisionStrikes.length ? decisionStrikes : gexStrikes)
+  const fallbackCalls = windowForWalls
+    .filter((s) => !options.preferDirectionalWalls || s.strike >= lastPrice)
     .slice()
     .sort((a, b) => Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
-  const wallFrom = (items: GexStrikeData[], rank: number) => {
-    const item = items[rank - 1] ?? nearestActualStrikes[rank - 1] ?? nearestActualStrikes[0];
-    return { strike: item?.strike ?? lastPrice, rank, gex: item?.net_gex ?? 0 };
+  const fallbackPuts = windowForWalls
+    .filter((s) => !options.preferDirectionalWalls || s.strike <= lastPrice)
+    .slice()
+    .sort((a, b) => Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
+
+  const callWallFrom = (rank: number) => {
+    const item = callCandidates[rank - 1] ?? fallbackCalls[rank - 1] ?? fallbackCalls[0] ?? windowForWalls[0];
+    return { strike: item?.strike ?? lastPrice, rank, gex: item?.call_gex ?? item?.net_gex ?? 0 };
+  };
+  const putWallFrom = (rank: number) => {
+    const item = putCandidates[rank - 1] ?? fallbackPuts[rank - 1] ?? fallbackPuts[0] ?? windowForWalls[0];
+    return { strike: item?.strike ?? lastPrice, rank, gex: item?.put_gex ?? item?.net_gex ?? 0 };
   };
 
-  const callWalls = [wallFrom(sortedByGexDesc, 1), wallFrom(sortedByGexDesc, 2)];
-  const putWalls = [wallFrom(sortedByGexAsc, 1), wallFrom(sortedByGexAsc, 2)];
+  const callWalls = [callWallFrom(1), callWallFrom(2)];
+  const putWalls = [putWallFrom(1), putWallFrom(2)];
 
   // 5. Max Pain
   let maxPain = lastPrice;

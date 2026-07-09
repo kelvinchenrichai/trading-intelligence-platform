@@ -11,6 +11,14 @@ import { YahooFinanceProvider } from "./src/providers/yahooFinance";
 import { CmeImportService } from "./src/cme/service";
 import { parseCmeSection40 } from "./src/cme/parser";
 
+function cmeParserRank(version?: string | null): number {
+  if (version === "cme-pg40-v0.3.1-safe-optiontype-geometry") return 100;
+  if (version === "cme-pg40-v0.2.0-full-expiry-resolver") return 80;
+  if (version === "cme-pg40-v0.3.0-optiontype-column-resolver") return 20;
+  if (version === "cme-pg40-v0.1.0") return 10;
+  return 0;
+}
+
 async function buildDatabase(): Promise<RealMarketDatabase> {
   const yahoo = new YahooFinanceProvider();
   const hasMarketDataToken = Boolean(process.env.MARKETDATA_TOKEN?.trim());
@@ -109,9 +117,8 @@ async function startServer() {
       const latestCme = [...imports].sort((a, b) => {
         const dateCmp = String(b.tradeDate || "").localeCompare(String(a.tradeDate || ""));
         if (dateCmp !== 0) return dateCmp;
-        const aPreferred = a.parserVersion === "cme-pg40-v0.3.0-optiontype-column-resolver" ? 1 : 0;
-        const bPreferred = b.parserVersion === "cme-pg40-v0.3.0-optiontype-column-resolver" ? 1 : 0;
-        if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+        const rankCmp = cmeParserRank(b.parserVersion) - cmeParserRank(a.parserVersion);
+        if (rankCmp !== 0) return rankCmp;
         return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
       })[0];
       if (latestCme?.tradeDate && (!status.latestSnapshotDate || latestCme.tradeDate >= status.latestSnapshotDate)) {

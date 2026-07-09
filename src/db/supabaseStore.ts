@@ -30,7 +30,17 @@ export interface StoredRefresh {
 }
 
 const CHUNK_SIZE = 500;
-const PREFERRED_CME_PARSER_VERSION = "cme-pg40-v0.3.0-optiontype-column-resolver";
+const PREFERRED_CME_PARSER_VERSION = "cme-pg40-v0.3.1-safe-optiontype-geometry";
+
+function parserVersionRank(version: string | null | undefined): number {
+  if (version === "cme-pg40-v0.3.1-safe-optiontype-geometry") return 100;
+  // v0.3.0 parsed too aggressively with column offsets and can inflate OI,
+  // so keep v0.2 above it until a v0.3.1 import exists for the date.
+  if (version === "cme-pg40-v0.2.0-full-expiry-resolver") return 80;
+  if (version === "cme-pg40-v0.3.0-optiontype-column-resolver") return 20;
+  if (version === "cme-pg40-v0.1.0") return 10;
+  return 0;
+}
 
 function chunks<T>(input: T[], size = CHUNK_SIZE): T[][] {
   const result: T[][] = [];
@@ -53,9 +63,8 @@ function selectPreferredCmeImport(rows: any[]): any | null {
   const sorted = [...rows].sort((a, b) => {
     const dateCmp = String(b.trade_date || "").localeCompare(String(a.trade_date || ""));
     if (dateCmp !== 0) return dateCmp;
-    const aPreferred = a.parser_version === PREFERRED_CME_PARSER_VERSION ? 1 : 0;
-    const bPreferred = b.parser_version === PREFERRED_CME_PARSER_VERSION ? 1 : 0;
-    if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+    const rankCmp = parserVersionRank(b.parser_version) - parserVersionRank(a.parser_version);
+    if (rankCmp !== 0) return rankCmp;
     return String(b.created_at || "").localeCompare(String(a.created_at || ""));
   });
   return sorted[0];
@@ -365,7 +374,7 @@ export class SupabaseStore {
       order: "created_at.desc",
       limit: "20",
     });
-    const latest = imports.find((row) => row.parser_version === PREFERRED_CME_PARSER_VERSION) || imports[0];
+    const latest = selectPreferredCmeImport(imports);
     if (!latest) return null;
 
     const rows = await this.requestAllRows<any>("cme_nq_option_contracts", {
