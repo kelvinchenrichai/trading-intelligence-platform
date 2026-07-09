@@ -31,8 +31,29 @@ const fmtMoney = (n: number) => {
   return `${sign}${abs.toFixed(0)}`;
 };
 
-function dte(tradeDate: string, expiryDate: string): number {
-  return Math.max(0, Math.ceil((new Date(expiryDate).getTime() - new Date(tradeDate).getTime()) / 86400000));
+export function addTradingDays(date: string, days: number): string {
+  const d = new Date(`${date}T00:00:00Z`);
+  let added = 0;
+  while (added < days) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    const dow = d.getUTCDay();
+    if (dow !== 0 && dow !== 6) added += 1;
+  }
+  return d.toISOString().slice(0, 10);
+}
+
+export function targetSessionDateForTradeDate(tradeDate: string): string {
+  // CME PG40 is an EOD bulletin.  The trading map prepared from it is for the
+  // next regular trading session, not for the finished EOD trade date.
+  return addTradingDays(tradeDate, 1);
+}
+
+export function activeForTargetSession<T extends { expiry: string }>(items: T[], targetSessionDate: string): T[] {
+  return items.filter((item) => item.expiry >= targetSessionDate);
+}
+
+function dte(anchorDate: string, expiryDate: string): number {
+  return Math.max(0, Math.ceil((new Date(expiryDate).getTime() - new Date(anchorDate).getTime()) / 86400000));
 }
 
 export function analyzeCmeResolved(
@@ -109,7 +130,7 @@ function gammaPivotFromGex(strikes: DailyReport["gamma"]["gex_strikes"]): number
   return best.strike;
 }
 
-function summarizeExpiry(label: string, expiryDate: string, tradeDate: string, report: DailyReport, allGrossGex: number): ExpiryGexSummary {
+function summarizeExpiry(label: string, expiryDate: string, targetSessionDate: string, report: DailyReport, allGrossGex: number): ExpiryGexSummary {
   const gex = report.gamma.gex_strikes;
   const netGex = gex.reduce((acc, s) => acc + s.net_gex, 0);
   const grossGex = gex.reduce((acc, s) => acc + Math.abs(s.net_gex), 0);
@@ -120,7 +141,7 @@ function summarizeExpiry(label: string, expiryDate: string, tradeDate: string, r
   return {
     label,
     expiryDate,
-    dte: dte(tradeDate, expiryDate),
+    dte: dte(targetSessionDate, expiryDate),
     callWall: report.gamma.call_walls[0]?.strike ?? null,
     putWall: report.gamma.put_walls[0]?.strike ?? null,
     gammaFlip: report.gamma.flip_level ?? null,
@@ -147,11 +168,13 @@ export function buildCmeExpiryBreakdown(
   confidence: "high" | "medium" | "low",
   macro: { VIX: number; DXY: number; US10Y: number },
 ): { expiryBreakdown: ExpiryGexSummary[]; selectedPanels: ExpiryGexSummary[] } {
-  const allReport = analyzeCmeResolved(cme.underlyingContract, cme.tradeDate, cme.futuresSettlement, resolved, confidence, macro);
+  const targetSessionDate = targetSessionDateForTradeDate(cme.tradeDate);
+  const activeResolved = activeForTargetSession(resolved, targetSessionDate);
+  const allReport = analyzeCmeResolved(cme.underlyingContract, cme.tradeDate, cme.futuresSettlement, activeResolved.length ? activeResolved : resolved, confidence, macro);
   const allGrossGex = allReport.gamma.gex_strikes.reduce((acc, s) => acc + Math.abs(s.net_gex), 0);
 
   const byExpiry = new Map<string, ResolvedOption[]>();
-  for (const option of resolved) {
+  for (const option of (activeResolved.length ? activeResolved : resolved)) {
     const bucket = byExpiry.get(option.expiry) || [];
     bucket.push(option);
     byExpiry.set(option.expiry, bucket);
@@ -163,7 +186,7 @@ export function buildCmeExpiryBreakdown(
   }
 
   const expiryBreakdown = [...byExpiry.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([expiryDate, items]) => {
-    const expiryDte = dte(cme.tradeDate, expiryDate);
+    const expiryDte = dte(targetSessionDate, expiryDate);
     const report = analyzeCmeResolved(
       cme.underlyingContract,
       cme.tradeDate,
@@ -177,7 +200,7 @@ export function buildCmeExpiryBreakdown(
           ? { decisionWindowMinPoints: 900, wallDistanceWeight: 0.35 }
           : { wallDistanceWeight: 0.15 },
     );
-    return summarizeExpiry(labels.get(expiryDate) || expiryDate, expiryDate, cme.tradeDate, report, allGrossGex);
+    return summarizeExpiry(labels.get(expiryDate) || expiryDate, expiryDate, targetSessionDate, report, allGrossGex);
   });
 
   const selected = new Map<string, ExpiryGexSummary>();
@@ -197,6 +220,7 @@ export function buildCmeAuditStatus(cme: CmeImportWithContracts) {
   const expiries = new Set(cme.contracts.map((c) => c.expiryDate));
   return {
     tradeDate: cme.tradeDate,
+    targetSessionDate: targetSessionDateForTradeDate(cme.tradeDate),
     underlyingContract: cme.underlyingContract,
     futuresSettlement: cme.futuresSettlement,
     parsedContractsCount: cme.contracts.length,
@@ -224,7 +248,7 @@ export function buildTradingViewPayloads(report: DailyReport): TradingViewPayloa
   while (putWalls.length < 10) putWalls.push(0);
 
   const source = report.data_mode || "NDX_PROXY_FALLBACK";
-  const tradeDate = report.source_status?.dashboardDate || report.as_of.slice(0, 10);
+  const tradeDate = report.source_status?.cmeTargetSessionDate || report.source_status?.dashboardDate || report.as_of.slice(0, 10);
   const underlying = report.source_status?.cmeUnderlying || report.proxy;
   const ng = Math.round(report.total_net_gex ?? report.gamma.gex_strikes.reduce((acc, s) => acc + s.net_gex, 0));
   const levels = [
@@ -278,6 +302,49 @@ function capConfidence(value: "high" | "medium" | "low", cap: "high" | "medium" 
   return confidenceFromRank(Math.min(confidenceRank(value), confidenceRank(cap)));
 }
 
+function uniqueOrderedLevels(levels: Array<number | null | undefined>, direction: "up" | "down"): number[] {
+  const cleaned = levels
+    .filter((x): x is number => typeof x === "number" && Number.isFinite(x))
+    .map((x) => Math.round(x));
+  const unique: number[] = [];
+  for (const level of cleaned) {
+    if (!unique.some((x) => Math.abs(x - level) <= 10)) unique.push(level);
+  }
+  return direction === "up" ? unique.sort((a, b) => a - b) : unique.sort((a, b) => b - a);
+}
+
+function buildDirectionalPath(report: DailyReport, direction: "up" | "down"): number[] {
+  const spot = report.price.last;
+  const em = report.price.expected_move;
+  const searchWindow = Math.max(1200, em.points * 2);
+  if (direction === "up") {
+    const gexResistance = report.gamma.gex_strikes
+      .filter((s) => s.strike > spot && Math.abs(s.strike - spot) <= searchWindow && (s.net_gex > 0 || s.call_gex > 0))
+      .sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || Math.abs(b.net_gex) - Math.abs(a.net_gex))
+      .slice(0, 8)
+      .map((s) => s.strike);
+    return uniqueOrderedLevels([
+      ...report.gamma.call_walls.map((w) => w.strike),
+      ...gexResistance,
+      em.high,
+    ].filter((x): x is number => typeof x === "number" && x > spot), "up").slice(0, 6);
+  }
+  const gexSupport = report.gamma.gex_strikes
+    .filter((s) => s.strike < spot && Math.abs(s.strike - spot) <= searchWindow && (s.net_gex < 0 || s.put_gex < 0))
+    .sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || Math.abs(b.net_gex) - Math.abs(a.net_gex))
+    .slice(0, 10)
+    .map((s) => s.strike);
+  return uniqueOrderedLevels([
+    ...gexSupport,
+    em.low,
+    ...report.gamma.put_walls.map((w) => w.strike),
+  ].filter((x): x is number => typeof x === "number" && x < spot), "down").slice(0, 7);
+}
+
+function pathText(levels: number[]) {
+  return levels.length ? levels.map((x) => Math.round(x)).join(" → ") : "等待牆位確認";
+}
+
 function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOutput["premarketBias"] {
   const spot = report.price.last;
   const flip = report.gamma.flip_level;
@@ -288,80 +355,85 @@ function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOut
   const isNegative = report.gamma.status === "negative";
   const isPositive = report.gamma.status === "positive";
   const flipDistancePts = Math.round(spot - flip);
-  const callDistance = callWall === null ? Infinity : Math.abs(callWall - spot);
-  const putDistance = putWall === null ? Infinity : Math.abs(spot - putWall);
+  const flipBuffer = Math.max(35, Math.round(report.price.expected_move.points * 0.12));
+  const bullishBreak = Math.round(flip + flipBuffer);
+  const bearishBreak = Math.round(flip - flipBuffer);
 
+  const positiveGex = report.gamma.gex_strikes.filter((s) => s.net_gex > 0).reduce((acc, s) => acc + s.net_gex, 0);
+  const negativeGexAbs = Math.abs(report.gamma.gex_strikes.filter((s) => s.net_gex < 0).reduce((acc, s) => acc + s.net_gex, 0));
+  const putDominance = positiveGex > 0 ? negativeGexAbs / positiveGex : 1;
+
+  let bearish = 35;
+  let bullish = 35;
+  let range = 30;
   let score = 0;
-  if (isNegative) score -= 1;
-  if (isPositive) score += 0.5;
-  if (spot > flip) score += isNegative ? 1 : 0.5;
-  if (spot < flip) score -= isNegative ? 1 : 0.5;
-  if (callWall !== null && spot > callWall) score += 1.5;
-  if (putWall !== null && spot < putWall) score -= 1.5;
-  if (nearFlip) score *= 0.25;
-  if (report.regime.quadrant === "range_bound") score *= 0.4;
-  if (report.regime.quadrant === "chop_whipsaw") score *= 0.3;
 
-  const clamped = Math.max(-3, Math.min(3, score));
-  let bearish = 35 + Math.round(Math.max(0, -clamped) * 10);
-  let bullish = 35 + Math.round(Math.max(0, clamped) * 10);
-  let range = 100 - bearish - bullish;
-  if (nearFlip) {
-    bearish = spot < flip ? 40 : 35;
-    bullish = spot > flip ? 40 : 35;
-    range = 25;
-  } else if (report.regime.quadrant === "range_bound") {
+  if (isNegative) {
+    // MenthorQ-style: Negative GEX is an expansion-prone structure.  Being near
+    // HVL means wait for execution confirmation; it should not be converted into
+    // a high range probability by itself.
+    bearish = 60;
+    bullish = 25;
+    range = 15;
+    score = -1.4;
+    if (putDominance >= 1.25) { bearish += 7; bullish -= 4; range -= 3; score -= 0.4; }
+    if (spot < flip) { bearish += 5; bullish -= 3; score -= 0.3; }
+    if (spot > flip + flipBuffer) { bullish += 7; bearish -= 5; score += 0.5; }
+  } else if (isPositive) {
     range = 45;
-    bullish = callDistance > putDistance ? 30 : 25;
+    bullish = spot > flip ? 32 : 25;
     bearish = 100 - range - bullish;
+    score = spot > flip ? 0.6 : -0.2;
   }
+
+  bearish = Math.max(5, Math.min(85, Math.round(bearish)));
+  bullish = Math.max(5, Math.min(85, Math.round(bullish)));
+  range = Math.max(5, Math.min(60, Math.round(range)));
+  const total = bearish + bullish + range;
+  const probabilities = {
+    bullish: Math.round((bullish / total) * 100),
+    bearish: Math.round((bearish / total) * 100),
+    range: Math.round((range / total) * 100),
+  };
+
+  const bullishPath = buildDirectionalPath(report, "up");
+  const bearishPath = buildDirectionalPath(report, "down");
 
   let direction: NonNullable<PlaybookOutput["premarketBias"]>["direction"] = "wait";
   let label = "無優勢 / 等待確認";
-  if (!nearFlip && report.regime.quadrant === "range_bound") {
+  if (isNegative) {
+    direction = probabilities.bearish >= 55 ? "bearish" : "wait";
+    label = nearFlip ? "結構偏空 / Flip 等待" : "條件性偏空擴張";
+  } else if (report.regime.quadrant === "range_bound") {
     direction = "range";
     label = "盤整區間 / 邊界交易";
-  } else if (!nearFlip && clamped <= -0.75) {
-    direction = "bearish";
-    label = "條件性偏空";
-  } else if (!nearFlip && clamped >= 0.75) {
+  } else if (probabilities.bullish > probabilities.bearish + 10) {
     direction = "bullish";
     label = "條件性偏多";
-  } else if (nearFlip && isNegative) {
-    direction = spot < flip ? "bearish" : "wait";
-    label = spot < flip ? "中性偏空 / 等待破位" : "無優勢 / Flip 區等待";
   }
 
-  const confidence = capConfidence(report.regime.conviction ?? report.data_confidence, nearFlip ? "medium" : report.data_confidence);
-  const rounded = { bullish: Math.max(5, bullish), bearish: Math.max(5, bearish), range: Math.max(5, range) };
-  const total = rounded.bullish + rounded.bearish + rounded.range;
-  const probabilities = {
-    bullish: Math.round((rounded.bullish / total) * 100),
-    bearish: Math.round((rounded.bearish / total) * 100),
-    range: Math.round((rounded.range / total) * 100),
-  };
-
-  const summary = nearFlip
-    ? `價格距離 Gamma Flip 約 ${Math.abs(flipDistancePts)} 點，盤前不給單邊高信念。若站回 ${Math.round(flip)} 上方並接受，才看上方 ${callWall ?? "Call Wall"}；若跌破 Flip / VWAP 並收不回，才看下方 ${putWall ?? "Put Wall"}。`
-    : direction === "bearish"
-      ? `盤前條件偏空：價格位於 Flip 下方且處於負 Gamma 結構，破位後容易放大；但必須等 2×5m close / BOS_DOWN 確認。`
-      : direction === "bullish"
-        ? `盤前條件偏多：價格站在 Flip 上方，若回踩不破並突破 Call Wall，負 Gamma 也可能放大上行。`
-        : `盤前偏區間：正 Gamma / 邊界未破時，優先看 ${putWall ?? "Put Wall"} 到 ${callWall ?? "Call Wall"} 的反應，不追中間價。`;
+  const confidence = capConfidence(report.regime.conviction ?? report.data_confidence, nearFlip ? "low" : report.data_confidence);
+  const summary = isNegative
+    ? `盤前結構偏空擴張：Net GEX 為負，且下方 Put/GEX 防守厚度高於上方推動力。執行上仍要等價格離開 HVL / Flip zone；目前距離 Flip 約 ${Math.abs(flipDistancePts)} 點，不可在中間追單。`
+    : direction === "range"
+      ? `盤前偏區間：正 Gamma / 邊界未破時，優先看 ${putWall ?? "Put Wall"} 到 ${callWall ?? "Call Wall"} 的反應，不追中間價。`
+      : `盤前等待確認：先看 ${Math.round(flip)} 附近能否被接受，再判斷偏多或偏空。`;
 
   return {
     direction,
     label,
     confidence,
-    score: Math.round(clamped * 10) / 10,
+    score: Math.round(score * 10) / 10,
     probabilities,
     summary,
-    bullishTrigger: `偏多條件：2×5m close above ${nearFlip ? Math.round(flip) : (callWall ?? Math.round(flip))} + VWAP reclaim / BOS_UP；目標先看 ${callWall ?? emHigh}，再看 EM High ${emHigh}。`,
-    bearishTrigger: `偏空條件：2×5m close below ${nearFlip ? Math.round(flip) : (putWall ?? Math.round(flip))} + VWAP rejection / BOS_DOWN；目標先看 ${putWall ?? emLow}，再看 EM Low ${emLow}。`,
-    invalidation: `若突破後重新回到 Flip zone，或價格在 ${Math.round(flip)} 附近反覆穿越，盤前偏向失效，回到 No Edge。`,
+    bullishTrigger: `偏多條件：2×5m close above ${bullishBreak} + VWAP reclaim / BOS_UP；目標路徑：${pathText(bullishPath.length ? bullishPath : [emHigh, callWall].filter((x): x is number => typeof x === "number"))}。`,
+    bearishTrigger: `偏空條件：2×5m close below ${bearishBreak} + VWAP rejection / BOS_DOWN；目標路徑：${pathText(bearishPath.length ? bearishPath : [emLow, putWall].filter((x): x is number => typeof x === "number"))}。`,
+    bullishPath,
+    bearishPath,
+    invalidation: `若突破後重新回到 ${bearishBreak}～${bullishBreak} 的 Flip zone，或價格在 ${Math.round(flip)} 附近反覆穿越，盤前偏向失效，回到 No Edge。`,
     notes: [
       "這是盤前條件推演，不是喊單；方向必須由 TradingView 盤中確認。",
-      "Negative GEX 代表容易放大已確認方向，不等於天然看空或天然看多。",
+      "Negative GEX 代表容易放大已確認方向；貼近 HVL 代表執行要等待，不代表盤整機率高。",
     ],
   };
 }

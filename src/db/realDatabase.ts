@@ -16,7 +16,7 @@ import { getMacroFromFred } from "../providers/fredMacro";
 import { analyzeMarketStructure } from "../utils/engine";
 import { fetchFuturesBasis, applyBasisToReport } from "../providers/futuresBasis";
 import { computeCmeGex } from "../cme/cmeGex";
-import { analyzeCmeResolved, buildCmeAuditStatus, buildCmeExpiryBreakdown, buildConfluence, buildDefaultSessionMonitor, buildPlaybook, buildTradingViewPayloads } from "../cme/report";
+import { activeForTargetSession, analyzeCmeResolved, buildCmeAuditStatus, buildCmeExpiryBreakdown, buildConfluence, buildDefaultSessionMonitor, buildPlaybook, buildTradingViewPayloads, targetSessionDateForTradeDate } from "../cme/report";
 import type { CmeImportWithContracts } from "../cme/report";
 import { SupabaseStore } from "./supabaseStore";
 
@@ -239,6 +239,9 @@ export class RealMarketDatabase {
     } : { VIX: 0, DXY: 0, US10Y: 4.0 });
 
     const cme = computeCmeGex(cmeData.contracts, cmeData.futuresSettlement);
+    const targetSessionDate = targetSessionDateForTradeDate(cmeData.tradeDate);
+    const activeResolved = activeForTargetSession(cme.resolved, targetSessionDate);
+    const resolvedForReport = activeResolved.length ? activeResolved : cme.resolved;
     const cmeExpiryCount = new Set(cmeData.contracts.map((contract) => contract.expiryDate)).size;
     const rowCoverageLow = cmeData.contracts.length < 1500 || cmeExpiryCount < 6;
     const rowCoverageMedium = cmeData.contracts.length < 2500 || cmeExpiryCount < 10;
@@ -251,7 +254,7 @@ export class RealMarketDatabase {
       cmeData.underlyingContract,
       cmeData.tradeDate,
       cmeData.futuresSettlement,
-      cme.resolved,
+      resolvedForReport,
       cmeConfidence,
       macro,
     );
@@ -265,6 +268,7 @@ export class RealMarketDatabase {
       primarySource: "CME PG40 Official EOD",
       dashboardDate,
       cmeTradeDate: cmeData.tradeDate,
+      cmeTargetSessionDate: targetSessionDate,
       cmeImportId: cmeData.id,
       cmeUnderlying: cmeData.underlyingContract,
       cmeFuturesSettlement: cmeData.futuresSettlement,
@@ -437,6 +441,9 @@ export class RealMarketDatabase {
             const cmeData = await this.config.store.getCmeContractsByTradeDate(result.snapshotDate);
             if (cmeData && cmeData.contracts.length > 0 && cmeData.futuresSettlement > 0) {
               const cme = computeCmeGex(cmeData.contracts, cmeData.futuresSettlement);
+              const targetSessionDate = targetSessionDateForTradeDate(cmeData.tradeDate);
+              const activeResolved = activeForTargetSession(cme.resolved, targetSessionDate);
+              const resolvedForReport = activeResolved.length ? activeResolved : cme.resolved;
               const cmeExpiryCount = new Set(cmeData.contracts.map((contract) => contract.expiryDate)).size;
               const rowCoverageLow = cmeData.contracts.length < 1500 || cmeExpiryCount < 6;
               const rowCoverageMedium = cmeData.contracts.length < 2500 || cmeExpiryCount < 10;
@@ -449,7 +456,7 @@ export class RealMarketDatabase {
                 cmeData.underlyingContract,
                 cmeData.tradeDate,
                 cmeData.futuresSettlement,
-                cme.resolved,
+                resolvedForReport,
                 cmeConfidence,
                 macro,
               );
@@ -462,6 +469,7 @@ export class RealMarketDatabase {
                 primarySource: "CME PG40 Official EOD",
                 dashboardDate: result.snapshotDate,
                 cmeTradeDate: cmeData.tradeDate,
+                cmeTargetSessionDate: targetSessionDate,
                 cmeImportId: cmeData.id,
                 cmeUnderlying: cmeData.underlyingContract,
                 cmeFuturesSettlement: cmeData.futuresSettlement,

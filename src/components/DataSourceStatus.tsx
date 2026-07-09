@@ -41,7 +41,8 @@ export const DataSourceStatus: React.FC<{ report: DailyReport; lang?: "zh" | "en
         <Tile label={isZh ? "Dashboard 日期" : "Dashboard Date"} value={status.dashboardDate || "—"} />
         <Tile label={isZh ? "主要資料來源" : "Primary Source"} value={translateText(status.primarySource, lang)} />
         <Tile label={isZh ? "資料模式" : "Data Mode"} value={translateText(status.dataMode, lang)} />
-        <Tile label={isZh ? "CME 交易日" : "CME Trade Date"} value={status.cmeTradeDate || "—"} tone={isCme ? "good" : "muted"} />
+        <Tile label={isZh ? "CME 資料日" : "CME Data Date"} value={status.cmeTradeDate || "—"} tone={isCme ? "good" : "muted"} />
+        <Tile label={isZh ? "盤前交易日" : "Target Session"} value={status.cmeTargetSessionDate || "—"} tone={isCme ? "good" : "muted"} />
         <Tile label={isZh ? "標的合約" : "Underlying"} value={status.cmeUnderlying || status.proxy?.instrument || "—"} />
         <Tile label={isZh ? "期貨結算價" : "Futures Settlement"} value={status.cmeFuturesSettlement ? String(status.cmeFuturesSettlement) : "—"} />
         <Tile label={isZh ? "解析合約數" : "Contracts Parsed"} value={status.cmeContractsParsed?.toLocaleString() || "—"} />

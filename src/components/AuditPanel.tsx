@@ -78,7 +78,8 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ proxy, date, lang = "zh"
           <span className="text-[10px] font-mono text-[#2DD4A7] bg-[#2DD4A7]/10 border border-[#2DD4A7]/20 rounded-full px-3 py-1">{isZh ? "CME 官方 EOD" : "CME Official EOD"}</span>
         </div>
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 text-xs font-mono">
-          <Metric label={isZh ? "CME 交易日" : "CME trade date"} value={cmeAudit.tradeDate} note={isZh ? "已匹配 Dashboard 日期" : "Dashboard date matched"} tone="good" />
+          <Metric label={isZh ? "CME 資料日" : "CME data date"} value={cmeAudit.tradeDate} note={isZh ? "官方 EOD 資料日" : "Official EOD data date"} tone="good" />
+          <Metric label={isZh ? "盤前交易日" : "Target session"} value={cmeAudit.targetSessionDate || "—"} note={isZh ? "此地圖服務的交易日" : "Session this map prepares for"} tone="good" />
           <Metric label={isZh ? "標的合約" : "Underlying contract"} value={cmeAudit.underlyingContract} note="CME futures options" tone="neutral" />
           <Metric label={isZh ? "期貨結算價" : "Futures settlement"} value={String(cmeAudit.futuresSettlement)} note="Black-76 forward" tone="neutral" />
           <Metric label={isZh ? "解析合約數" : "Parsed contracts"} value={cmeAudit.parsedContractsCount.toLocaleString()} note="PG40 rows" tone="neutral" />

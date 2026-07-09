@@ -119,6 +119,8 @@ export interface DataSourceStatusBlock {
   primarySource: string;
   dashboardDate: string;
   cmeTradeDate?: string | null;
+  /** Trading session this EOD CME map is intended to prepare for. Usually next trading day after CME trade date. */
+  cmeTargetSessionDate?: string | null;
   cmeImportId?: string | null;
   cmeUnderlying?: string | null;
   cmeFuturesSettlement?: number | null;
@@ -141,6 +143,8 @@ export interface DataSourceStatusBlock {
 
 export interface CmeAuditStatus {
   tradeDate: string;
+  /** Trading session this CME EOD map prepares for. */
+  targetSessionDate?: string | null;
   underlyingContract: string;
   futuresSettlement: number;
   parsedContractsCount: number;
@@ -185,6 +189,8 @@ export interface PremarketBiasOutput {
   summary: string;
   bullishTrigger: string;
   bearishTrigger: string;
+  bullishPath?: number[];
+  bearishPath?: number[];
   invalidation: string;
   notes: string[];
 }

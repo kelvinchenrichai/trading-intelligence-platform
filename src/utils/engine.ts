@@ -334,6 +334,45 @@ export function analyzeMarketStructure(
   if (!isFinite(flipLevel)) {
     flipLevel = lastPrice;
   }
+
+  // MenthorQ-style HVL refinement:
+  // The scan above recomputes total GEX across hypothetical spots, which is the
+  // correct zero-gamma estimate.  However, desk HVL often behaves more like the
+  // near-spot profile transition where strike-level net GEX flips from negative
+  // to positive.  When that profile transition is very close to spot, prefer it
+  // as the display HVL. This reduces the common 50-100 point drift between
+  // theoretical zero gamma and the vendor-style HVL line while preserving the
+  // raw profile in audit.
+  const profileFlipWindow = Math.max(650, expectedMovePoints * 1.25);
+  const profileFlipCandidates: number[] = [];
+  const profileStrikes = [...gexStrikes]
+    .filter((s) => Math.abs(s.strike - lastPrice) <= profileFlipWindow && Math.abs(s.net_gex) > 0)
+    .sort((a, b) => a.strike - b.strike);
+
+  for (let i = 0; i < profileStrikes.length - 1; i++) {
+    const a = profileStrikes[i];
+    const b = profileStrikes[i + 1];
+    const denom = b.net_gex - a.net_gex;
+    const crosses = a.net_gex * b.net_gex < 0;
+    if (!crosses || denom === 0) continue;
+    const t = -a.net_gex / denom;
+    const candidate = a.strike + t * (b.strike - a.strike);
+    if (Number.isFinite(candidate)) profileFlipCandidates.push(candidate);
+  }
+
+  if (profileFlipCandidates.length) {
+    profileFlipCandidates.sort((a, b) => Math.abs(a - lastPrice) - Math.abs(b - lastPrice));
+    const profileFlip = profileFlipCandidates[0];
+    const scanDistance = Math.abs(flipLevel - lastPrice);
+    const profileDistance = Math.abs(profileFlip - lastPrice);
+    // Prefer the profile HVL when it sits near spot and is materially closer
+    // than the theoretical scan flip.  This is deliberately conservative so far
+    // tail sign changes cannot override a clean zero-gamma scan.
+    if (profileDistance <= Math.max(120, expectedMovePoints * 0.35) && profileDistance + 15 < scanDistance) {
+      flipLevel = profileFlip;
+    }
+  }
+
   flipLevel = Math.round(flipLevel * 10) / 10;
 
   // 4. Call Wall / Put Wall
