@@ -174,6 +174,11 @@ export interface SessionMonitorState {
   putWallTouched: boolean;
   putWallBreakdownConfirmed: boolean;
   wallFlipped?: "support" | "resistance" | null;
+  gammaFlipRejected?: boolean;
+  bosUp?: boolean;
+  bosDown?: boolean;
+  avwapReclaim?: boolean;
+  avwapReject?: boolean;
   currentSessionRegime: "No Edge" | "Consolidation / Pin" | "Expansion Up" | "Expansion Down" | "Neutral / Wait";
   explanation: string;
   updatedAt?: string | null;
@@ -191,6 +196,13 @@ export interface PremarketBiasOutput {
   bearishTrigger: string;
   bullishPath?: number[];
   bearishPath?: number[];
+  triggerLevels?: {
+    flip: number;
+    bullishBreak: number;
+    bearishBreak: number;
+    noEdgeLow: number;
+    noEdgeHigh: number;
+  };
   invalidation: string;
   notes: string[];
 }

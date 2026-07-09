@@ -488,9 +488,19 @@ export class SupabaseStore {
     const names = new Set(events.map((e) => e.event));
     const latest = events[0];
     let currentSessionRegime: SessionMonitorState["currentSessionRegime"] = "No Edge";
-    if (names.has("CALL_WALL_BREAKOUT_2X5M") || names.has("WALL_FLIPPED_SUPPORT") || names.has("BOS_UP")) currentSessionRegime = "Expansion Up";
-    else if (names.has("PUT_WALL_BREAKDOWN_2X5M") || names.has("WALL_FLIPPED_RESISTANCE") || names.has("BOS_DOWN")) currentSessionRegime = "Expansion Down";
-    else if (names.has("CALL_WALL_TOUCH") || names.has("PUT_WALL_TOUCH")) currentSessionRegime = "Consolidation / Pin";
+    const bullishConfirmed =
+      names.has("CALL_WALL_BREAKOUT_2X5M") ||
+      names.has("WALL_FLIPPED_SUPPORT") ||
+      names.has("BOS_UP") ||
+      (names.has("GAMMA_FLIP_RECLAIM") && names.has("AVWAP_RECLAIM"));
+    const bearishConfirmed =
+      names.has("PUT_WALL_BREAKDOWN_2X5M") ||
+      names.has("WALL_FLIPPED_RESISTANCE") ||
+      names.has("BOS_DOWN") ||
+      (names.has("GAMMA_FLIP_REJECT") && names.has("AVWAP_REJECT"));
+    if (bullishConfirmed) currentSessionRegime = "Expansion Up";
+    else if (bearishConfirmed) currentSessionRegime = "Expansion Down";
+    else if (names.has("CALL_WALL_TOUCH") || names.has("PUT_WALL_TOUCH") || names.has("CONFLUENCE_ZONE_ENTER")) currentSessionRegime = "Consolidation / Pin";
     else if (names.has("GAMMA_FLIP_TOUCH") || names.has("GAMMA_FLIP_RECLAIM") || names.has("GAMMA_FLIP_REJECT")) currentSessionRegime = "Neutral / Wait";
     return {
       lastEvent: latest?.event || null,
@@ -501,6 +511,11 @@ export class SupabaseStore {
       putWallTouched: names.has("PUT_WALL_TOUCH"),
       putWallBreakdownConfirmed: names.has("PUT_WALL_BREAKDOWN_2X5M"),
       wallFlipped: names.has("WALL_FLIPPED_SUPPORT") ? "support" : names.has("WALL_FLIPPED_RESISTANCE") ? "resistance" : null,
+      gammaFlipRejected: names.has("GAMMA_FLIP_REJECT"),
+      bosUp: names.has("BOS_UP"),
+      bosDown: names.has("BOS_DOWN"),
+      avwapReclaim: names.has("AVWAP_RECLAIM"),
+      avwapReject: names.has("AVWAP_REJECT"),
       currentSessionRegime,
       explanation: events.length ? "TradingView webhook events received and reduced into deterministic session state." : "No TradingView webhook events received for this model date yet.",
       updatedAt: latest?.received_at || null,
