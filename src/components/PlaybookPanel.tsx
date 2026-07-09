@@ -15,6 +15,27 @@ export const PlaybookPanel: React.FC<{ report: DailyReport; lang?: "zh" | "en" }
           <ClipboardList className="w-4 h-4 text-[#2DD4A7]" />
           {isZh ? "作戰地圖 / 警示" : "Playbook / Warnings"}
         </h3>
+        {p.premarketBias && (
+          <div className="mb-4 rounded-xl border border-indigo-400/20 bg-indigo-500/10 p-4">
+            <div className="flex flex-wrap items-center justify-between gap-3 mb-2">
+              <div>
+                <div className="text-[9px] uppercase tracking-wider text-indigo-200/80 font-mono">{isZh ? "今日盤前預判" : "Premarket Directional Read"}</div>
+                <div className="text-base font-display font-bold text-white mt-1">{translateRegime(p.premarketBias.label, lang)}</div>
+              </div>
+              <div className="flex gap-2 text-[10px] font-mono">
+                <span className="px-2 py-1 rounded bg-[#22C55E]/10 text-[#22C55E]">Bull {p.premarketBias.probabilities.bullish}%</span>
+                <span className="px-2 py-1 rounded bg-[#EF4444]/10 text-[#EF4444]">Bear {p.premarketBias.probabilities.bearish}%</span>
+                <span className="px-2 py-1 rounded bg-slate-500/10 text-slate-300">Range {p.premarketBias.probabilities.range}%</span>
+              </div>
+            </div>
+            <p className="text-xs text-slate-300 leading-relaxed">{translateText(p.premarketBias.summary, lang)}</p>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 mt-3 text-[11px]">
+              <div className="rounded-lg bg-[#0F151A]/70 border border-white/5 p-2 text-emerald-200">{translateText(p.premarketBias.bullishTrigger, lang)}</div>
+              <div className="rounded-lg bg-[#0F151A]/70 border border-white/5 p-2 text-red-200">{translateText(p.premarketBias.bearishTrigger, lang)}</div>
+            </div>
+            <p className="text-[11px] text-amber-200 mt-2 leading-relaxed">{translateText(p.premarketBias.invalidation, lang)}</p>
+          </div>
+        )}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
           <Row label={isZh ? "偏向" : "Bias"} value={translateRegime(p.bias, lang)} />
           <Row label={isZh ? "適合觀察" : "Favor"} value={translateText(p.favor, lang)} />

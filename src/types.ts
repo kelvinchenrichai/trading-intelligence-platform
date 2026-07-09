@@ -175,8 +175,24 @@ export interface SessionMonitorState {
   updatedAt?: string | null;
 }
 
+export interface PremarketBiasOutput {
+  /** 盤前條件偏向；不是喊單，必須等待盤中確認。 */
+  direction: "bullish" | "bearish" | "neutral" | "range" | "wait";
+  label: string;
+  confidence: "high" | "medium" | "low";
+  score: number;
+  probabilities: { bullish: number; bearish: number; range: number };
+  summary: string;
+  bullishTrigger: string;
+  bearishTrigger: string;
+  invalidation: string;
+  notes: string[];
+}
+
 export interface PlaybookOutput {
   bias: string;
+  /** MenthorQ-style premarket directional read. Conditional, not a trade signal. */
+  premarketBias?: PremarketBiasOutput;
   favor: string;
   avoid: string;
   trigger: string;

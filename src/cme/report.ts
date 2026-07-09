@@ -1,5 +1,5 @@
 import { DailyReport, ExpiryGexSummary, GexDisplayCalibration, OfficialProxyConfluence, PlaybookOutput, SessionMonitorState, TradingViewPayloads } from "../types";
-import { analyzeMarketStructure } from "../utils/engine";
+import { analyzeMarketStructure, AnalyzeMarketStructureOptions } from "../utils/engine";
 import { black76Gamma, ResolvedOption } from "./cmeGex";
 import { CmeNqOptionContract } from "./types";
 
@@ -42,6 +42,7 @@ export function analyzeCmeResolved(
   resolved: ResolvedOption[],
   confidence: "high" | "medium" | "low",
   macro: { VIX: number; DXY: number; US10Y: number },
+  engineOverrides: Partial<AnalyzeMarketStructureOptions> = {},
 ): DailyReport {
   const report = analyzeMarketStructure(
     "NQ",
@@ -57,6 +58,11 @@ export function analyzeCmeResolved(
       contractMultiplier: NQ_FUTURES_MULTIPLIER,
       gammaCalculator: (spot, strike, tYears, iv) => black76Gamma(spot, strike, tYears, iv),
       calculationMode: "CME_BLACK_76",
+      // CME full chains include far-tail strikes used for audit.  Headline
+      // trading levels should stay near the futures settlement / expected move.
+      decisionWindowMinPoints: 1000,
+      preferDirectionalWalls: true,
+      ...engineOverrides,
     },
   );
   return attachCmeGexDisplayCalibration(report);
@@ -157,7 +163,20 @@ export function buildCmeExpiryBreakdown(
   }
 
   const expiryBreakdown = [...byExpiry.entries()].sort((a, b) => a[0].localeCompare(b[0])).map(([expiryDate, items]) => {
-    const report = analyzeCmeResolved(cme.underlyingContract, cme.tradeDate, cme.futuresSettlement, items, confidence, macro);
+    const expiryDte = dte(cme.tradeDate, expiryDate);
+    const report = analyzeCmeResolved(
+      cme.underlyingContract,
+      cme.tradeDate,
+      cme.futuresSettlement,
+      items,
+      confidence,
+      macro,
+      expiryDte <= 2
+        ? { decisionWindowMinPoints: 650, wallDistanceWeight: 0.85 }
+        : expiryDte <= 10
+          ? { decisionWindowMinPoints: 900, wallDistanceWeight: 0.35 }
+          : { wallDistanceWeight: 0.15 },
+    );
     return summarizeExpiry(labels.get(expiryDate) || expiryDate, expiryDate, cme.tradeDate, report, allGrossGex);
   });
 
@@ -188,8 +207,13 @@ export function buildCmeAuditStatus(cme: CmeImportWithContracts) {
     pdfHash: cme.sha256 || null,
     importTimestamp: cme.createdAt || null,
     parserVersion: cme.parserVersion || cme.summary?.parserVersion || null,
-    warnings: cme.warnings || [],
-    duplicateStatus: "sha256 + parser_version import guard enabled",
+    warnings: [
+      ...(cme.warnings || []),
+      ...(cme.contractCount && cme.contracts.length < cme.contractCount
+        ? [`Dashboard fetched only ${cme.contracts.length}/${cme.contractCount} stored CME rows. Supabase pagination must be fixed before trusting this map.`]
+        : []),
+    ],
+    duplicateStatus: "sha256 + parser_version import guard enabled; paginated contract fetch enabled",
   };
 }
 
@@ -242,6 +266,106 @@ export function buildDefaultSessionMonitor(report: DailyReport): SessionMonitorS
   };
 }
 
+function confidenceRank(value: "high" | "medium" | "low") {
+  return value === "high" ? 3 : value === "medium" ? 2 : 1;
+}
+
+function confidenceFromRank(value: number): "high" | "medium" | "low" {
+  return value >= 3 ? "high" : value >= 2 ? "medium" : "low";
+}
+
+function capConfidence(value: "high" | "medium" | "low", cap: "high" | "medium" | "low") {
+  return confidenceFromRank(Math.min(confidenceRank(value), confidenceRank(cap)));
+}
+
+function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOutput["premarketBias"] {
+  const spot = report.price.last;
+  const flip = report.gamma.flip_level;
+  const callWall = report.gamma.call_walls[0]?.strike ?? null;
+  const putWall = report.gamma.put_walls[0]?.strike ?? null;
+  const emLow = report.price.expected_move.low;
+  const emHigh = report.price.expected_move.high;
+  const isNegative = report.gamma.status === "negative";
+  const isPositive = report.gamma.status === "positive";
+  const flipDistancePts = Math.round(spot - flip);
+  const callDistance = callWall === null ? Infinity : Math.abs(callWall - spot);
+  const putDistance = putWall === null ? Infinity : Math.abs(spot - putWall);
+
+  let score = 0;
+  if (isNegative) score -= 1;
+  if (isPositive) score += 0.5;
+  if (spot > flip) score += isNegative ? 1 : 0.5;
+  if (spot < flip) score -= isNegative ? 1 : 0.5;
+  if (callWall !== null && spot > callWall) score += 1.5;
+  if (putWall !== null && spot < putWall) score -= 1.5;
+  if (nearFlip) score *= 0.25;
+  if (report.regime.quadrant === "range_bound") score *= 0.4;
+  if (report.regime.quadrant === "chop_whipsaw") score *= 0.3;
+
+  const clamped = Math.max(-3, Math.min(3, score));
+  let bearish = 35 + Math.round(Math.max(0, -clamped) * 10);
+  let bullish = 35 + Math.round(Math.max(0, clamped) * 10);
+  let range = 100 - bearish - bullish;
+  if (nearFlip) {
+    bearish = spot < flip ? 40 : 35;
+    bullish = spot > flip ? 40 : 35;
+    range = 25;
+  } else if (report.regime.quadrant === "range_bound") {
+    range = 45;
+    bullish = callDistance > putDistance ? 30 : 25;
+    bearish = 100 - range - bullish;
+  }
+
+  let direction: NonNullable<PlaybookOutput["premarketBias"]>["direction"] = "wait";
+  let label = "無優勢 / 等待確認";
+  if (!nearFlip && report.regime.quadrant === "range_bound") {
+    direction = "range";
+    label = "盤整區間 / 邊界交易";
+  } else if (!nearFlip && clamped <= -0.75) {
+    direction = "bearish";
+    label = "條件性偏空";
+  } else if (!nearFlip && clamped >= 0.75) {
+    direction = "bullish";
+    label = "條件性偏多";
+  } else if (nearFlip && isNegative) {
+    direction = spot < flip ? "bearish" : "wait";
+    label = spot < flip ? "中性偏空 / 等待破位" : "無優勢 / Flip 區等待";
+  }
+
+  const confidence = capConfidence(report.regime.conviction ?? report.data_confidence, nearFlip ? "medium" : report.data_confidence);
+  const rounded = { bullish: Math.max(5, bullish), bearish: Math.max(5, bearish), range: Math.max(5, range) };
+  const total = rounded.bullish + rounded.bearish + rounded.range;
+  const probabilities = {
+    bullish: Math.round((rounded.bullish / total) * 100),
+    bearish: Math.round((rounded.bearish / total) * 100),
+    range: Math.round((rounded.range / total) * 100),
+  };
+
+  const summary = nearFlip
+    ? `價格距離 Gamma Flip 約 ${Math.abs(flipDistancePts)} 點，盤前不給單邊高信念。若站回 ${Math.round(flip)} 上方並接受，才看上方 ${callWall ?? "Call Wall"}；若跌破 Flip / VWAP 並收不回，才看下方 ${putWall ?? "Put Wall"}。`
+    : direction === "bearish"
+      ? `盤前條件偏空：價格位於 Flip 下方且處於負 Gamma 結構，破位後容易放大；但必須等 2×5m close / BOS_DOWN 確認。`
+      : direction === "bullish"
+        ? `盤前條件偏多：價格站在 Flip 上方，若回踩不破並突破 Call Wall，負 Gamma 也可能放大上行。`
+        : `盤前偏區間：正 Gamma / 邊界未破時，優先看 ${putWall ?? "Put Wall"} 到 ${callWall ?? "Call Wall"} 的反應，不追中間價。`;
+
+  return {
+    direction,
+    label,
+    confidence,
+    score: Math.round(clamped * 10) / 10,
+    probabilities,
+    summary,
+    bullishTrigger: `偏多條件：2×5m close above ${nearFlip ? Math.round(flip) : (callWall ?? Math.round(flip))} + VWAP reclaim / BOS_UP；目標先看 ${callWall ?? emHigh}，再看 EM High ${emHigh}。`,
+    bearishTrigger: `偏空條件：2×5m close below ${nearFlip ? Math.round(flip) : (putWall ?? Math.round(flip))} + VWAP rejection / BOS_DOWN；目標先看 ${putWall ?? emLow}，再看 EM Low ${emLow}。`,
+    invalidation: `若突破後重新回到 Flip zone，或價格在 ${Math.round(flip)} 附近反覆穿越，盤前偏向失效，回到 No Edge。`,
+    notes: [
+      "這是盤前條件推演，不是喊單；方向必須由 TradingView 盤中確認。",
+      "Negative GEX 代表容易放大已確認方向，不等於天然看空或天然看多。",
+    ],
+  };
+}
+
 export function buildPlaybook(report: DailyReport): PlaybookOutput {
   const spot = report.price.last;
   const callWall = report.gamma.call_walls[0]?.strike ?? null;
@@ -250,40 +374,47 @@ export function buildPlaybook(report: DailyReport): PlaybookOutput {
   const nearFlip = Math.abs(spot - flip) <= Math.max(40, spot * 0.0025);
   const warnings = [...(report.source_status?.sourceWarnings || [])];
   if (report.data_confidence !== "high") warnings.push("IV / source coverage is not high; keep confidence reduced.");
+  if (nearFlip) warnings.push("Price is inside the Gamma Flip zone; cap directional confidence and wait for confirmation.");
   if (report.data_mode === "NDX_PROXY_FALLBACK") warnings.push("This is proxy fallback, not CME official NQ futures options OI.");
+  const premarketBias = buildPremarketBias(report, nearFlip);
+  const baseConfidence = capConfidence(report.regime.conviction ?? report.data_confidence, report.data_confidence);
+  const nearFlipConfidence = capConfidence(baseConfidence, "medium");
 
   if (nearFlip) {
     return {
       bias: "No edge / Wait",
+      premarketBias,
       favor: "等待價格離開 Gamma Flip zone 後再看牆位確認。",
       avoid: "不要在 flip 附近追單；此區容易來回洗盤。",
       trigger: "連續 2 根 5m 收在 Call Wall 上方，或連續 2 根 5m 跌破 Put Wall。",
       invalidation: "突破後又回到 Flip zone 內。",
       keyLevels: [{ label: "Gamma Flip", level: flip }, { label: "Call Wall", level: callWall }, { label: "Put Wall", level: putWall }],
-      confidence: report.data_confidence,
+      confidence: nearFlipConfidence,
       warnings,
     };
   }
   if (report.gamma.status === "negative") {
     return {
       bias: "Negative GEX / Wait",
+      premarketBias,
       favor: "Negative GEX 代表破位後容易放大，但方向必須由盤中價格確認；先觀察 HVL / Gamma Flip、Call Wall、Put Wall 的收盤確認。",
       avoid: "不要把 Negative GEX 直接解讀成單邊看空或看多；等待 2×5m close、BOS、VWAP / AVWAP 確認後再判斷擴張方向。",
       trigger: "下方：2×5m close below Put Wall + BOS_DOWN。上方：2×5m close above Call Wall + BOS_UP。",
       invalidation: "價格反覆穿越 Gamma Flip / HVL，且沒有站到 Call/Put Wall 外側，視為 chop / no edge。",
       keyLevels: [{ label: "Gamma Flip / HVL", level: flip }, { label: "Put Wall", level: putWall }, { label: "Call Wall", level: callWall }, { label: "Expected Move Low", level: report.price.expected_move.low }, { label: "Expected Move High", level: report.price.expected_move.high }],
-      confidence: report.data_confidence === "high" ? "medium" : report.data_confidence,
+      confidence: capConfidence(baseConfidence, "medium"),
       warnings,
     };
   }
   return {
     bias: "Consolidation / Range",
+    premarketBias,
     favor: "優先等區間邊界反應；靠近支撐/壓力後看價格確認。",
     avoid: "避免在 Call/Put Wall 區間中間追單。",
     trigger: "靠近 Put Wall / Call Wall，且價格確認沒有 2×5m 站到牆外。",
     invalidation: "連續 2 根 5m 收在牆外並伴隨 BOS / ATR 擴張。",
     keyLevels: [{ label: "Call Wall", level: callWall }, { label: "Put Wall", level: putWall }, { label: "Max Pain", level: report.gamma.max_pain }, { label: "Gamma Flip", level: flip }],
-    confidence: report.data_confidence,
+    confidence: capConfidence(baseConfidence, nearFlip ? "medium" : "high"),
     warnings,
   };
 }

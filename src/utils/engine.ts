@@ -175,6 +175,12 @@ export interface AnalyzeMarketStructureOptions {
   decisionWindowMinPoints?: number;
   /** Prefer Call Wall above spot and Put Wall below spot for tradable dashboard levels. */
   preferDirectionalWalls?: boolean;
+  /**
+   * Optional distance-aware wall scoring. 0 keeps pure exposure ranking; higher
+   * values favor nearer strikes. Useful for 0DTE / front-expiry maps where desks
+   * care about tradable intraday walls more than far OI blobs.
+   */
+  wallDistanceWeight?: number;
 }
 
 export function analyzeMarketStructure(
@@ -343,14 +349,20 @@ export function analyzeMarketStructure(
   // Use option-type-specific exposure instead of net_gex.  A large ITM put above
   // spot can dominate net_gex, but it should not become the headline Put Support.
   const windowForWalls = decisionStrikes.length ? decisionStrikes : gexStrikes;
+  const wallDistanceWeight = options.wallDistanceWeight ?? 0;
+  const distanceBase = Math.max(50, expectedMovePoints || 250);
+  const wallScore = (exposureAbs: number, strike: number) => {
+    const distancePenalty = Math.pow(1 + Math.abs(strike - lastPrice) / distanceBase, wallDistanceWeight);
+    return exposureAbs / distancePenalty;
+  };
   const callCandidates = windowForWalls
     .filter((s) => s.call_gex > 0 && (!options.preferDirectionalWalls || s.strike >= lastPrice))
     .slice()
-    .sort((a, b) => b.call_gex - a.call_gex || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
+    .sort((a, b) => wallScore(b.call_gex, b.strike) - wallScore(a.call_gex, a.strike) || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
   const putCandidates = windowForWalls
     .filter((s) => s.put_gex < 0 && (!options.preferDirectionalWalls || s.strike <= lastPrice))
     .slice()
-    .sort((a, b) => a.put_gex - b.put_gex || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
+    .sort((a, b) => wallScore(Math.abs(b.put_gex), b.strike) - wallScore(Math.abs(a.put_gex), a.strike) || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
 
   const fallbackCalls = windowForWalls
     .filter((s) => !options.preferDirectionalWalls || s.strike >= lastPrice)

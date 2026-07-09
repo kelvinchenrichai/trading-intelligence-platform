@@ -11,12 +11,29 @@ const fmt = (n: number) => {
   return `${sign}${a.toFixed(0)}`;
 };
 
+function isAuditOnlyLevel(value: number | null | undefined, spot: number, emPoints: number) {
+  if (typeof value !== "number" || !Number.isFinite(value)) return false;
+  const window = Math.max(1000, emPoints * 1.25);
+  return Math.abs(value - spot) > window;
+}
+
+function expiryHasAuditOnlyLevels(item: ExpiryGexSummary, spot: number, emPoints: number) {
+  return (
+    isAuditOnlyLevel(item.callWall, spot, emPoints) ||
+    isAuditOnlyLevel(item.putWall, spot, emPoints) ||
+    isAuditOnlyLevel(item.gammaFlip, spot, emPoints) ||
+    isAuditOnlyLevel(item.gammaPivot, spot, emPoints)
+  );
+}
+
 export const MultiExpirationMap: React.FC<{ report: DailyReport; lang?: "zh" | "en" }> = ({ report, lang = "zh" }) => {
   const isZh = lang === "zh";
   const panels = report.selected_expiry_panels || [];
   const all = report.expiry_breakdown || [];
   const divisor = report.gex_display?.comparableDivisor || null;
   const showCmp = Boolean(report.gex_display);
+  const spot = report.price.last;
+  const emPoints = report.price.expected_move.points;
   if (!panels.length && !all.length) return null;
   return (
     <section className="glass-card p-6">
@@ -33,7 +50,7 @@ export const MultiExpirationMap: React.FC<{ report: DailyReport; lang?: "zh" | "
         <span className="text-[10px] font-mono text-slate-500">{all.length} {isZh ? "到期日群組" : "expiry groups"}</span>
       </div>
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-        {panels.map((item) => <ExpiryCard key={`${item.label}-${item.expiryDate}`} item={item} lang={lang} />)}
+        {panels.map((item) => <ExpiryCard key={`${item.label}-${item.expiryDate}`} item={item} lang={lang} auditOnly={expiryHasAuditOnlyLevels(item, spot, emPoints)} />)}
       </div>
       {all.length > 0 && (
         <div className="mt-5 rounded-xl border border-white/5 overflow-hidden">
@@ -44,7 +61,8 @@ export const MultiExpirationMap: React.FC<{ report: DailyReport; lang?: "zh" | "
               <tbody className="divide-y divide-white/5">
                 {all.map((e) => {
                   const displayNet = showCmp ? (e.comparableNetGex ?? Math.round(e.netGex / (divisor || 1))) : e.netGex;
-                  return <tr key={e.expiryDate} className="hover:bg-white/[0.02]"><td className="p-3 text-slate-300">{e.expiryDate}</td><td className="p-3 text-slate-400">{e.dte}</td><td className="p-3 text-right text-[#EF4444] font-bold">{e.callWall ?? "—"}</td><td className="p-3 text-right text-[#22C55E] font-bold">{e.putWall ?? "—"}</td><td className="p-3 text-right text-[#F2A93B]">{e.gammaFlip ?? "—"}</td><td className="p-3 text-right text-indigo-300">{e.gammaPivot ?? "—"}</td><td className={`p-3 text-right font-bold ${displayNet >= 0 ? "text-[#22C55E]" : "text-[#EF4444]"}`}>{fmt(displayNet)}</td><td className="p-3 text-right text-slate-400">{fmt(e.rawNetGex ?? e.netGex)}</td><td className="p-3 text-right text-slate-300">{e.expiryStructureImpactPct}%</td></tr>;
+                  const auditOnly = expiryHasAuditOnlyLevels(e, spot, emPoints);
+                  return <tr key={e.expiryDate} className="hover:bg-white/[0.02]"><td className="p-3 text-slate-300">{e.expiryDate}{auditOnly && <span className="ml-2 px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300 text-[9px]">Audit</span>}</td><td className="p-3 text-slate-400">{e.dte}</td><td className="p-3 text-right text-[#EF4444] font-bold">{e.callWall ?? "—"}</td><td className="p-3 text-right text-[#22C55E] font-bold">{e.putWall ?? "—"}</td><td className="p-3 text-right text-[#F2A93B]">{e.gammaFlip ?? "—"}</td><td className="p-3 text-right text-indigo-300">{e.gammaPivot ?? "—"}</td><td className={`p-3 text-right font-bold ${displayNet >= 0 ? "text-[#22C55E]" : "text-[#EF4444]"}`}>{fmt(displayNet)}</td><td className="p-3 text-right text-slate-400">{fmt(e.rawNetGex ?? e.netGex)}</td><td className="p-3 text-right text-slate-300">{e.expiryStructureImpactPct}%</td></tr>;
                 })}
               </tbody>
             </table>
@@ -55,11 +73,11 @@ export const MultiExpirationMap: React.FC<{ report: DailyReport; lang?: "zh" | "
   );
 };
 
-const ExpiryCard: React.FC<{ item: ExpiryGexSummary; lang: "zh" | "en" }> = ({ item, lang }) => {
+const ExpiryCard: React.FC<{ item: ExpiryGexSummary; lang: "zh" | "en"; auditOnly?: boolean }> = ({ item, lang, auditOnly = false }) => {
   const isZh = lang === "zh";
   return (
     <div className="rounded-xl border border-white/5 bg-[#171E24]/60 p-4 font-mono text-xs">
-      <div className="flex justify-between gap-3 mb-3"><div><div className="text-[10px] text-slate-500 uppercase">{item.label}</div><div className="text-white font-bold mt-1">{item.expiryDate}</div></div><span className="text-[10px] text-indigo-300 bg-indigo-500/10 px-2 py-1 rounded h-fit">{isZh ? "DTE" : "DTE"} {item.dte}</span></div>
+      <div className="flex justify-between gap-3 mb-3"><div><div className="text-[10px] text-slate-500 uppercase">{item.label}</div><div className="text-white font-bold mt-1">{item.expiryDate}</div>{auditOnly && <div className="mt-1 text-[9px] text-amber-300 bg-amber-500/10 rounded px-1.5 py-0.5 inline-block">{isZh ? "Audit only / 遠端參考" : "Audit only"}</div>}</div><span className="text-[10px] text-indigo-300 bg-indigo-500/10 px-2 py-1 rounded h-fit">{isZh ? "DTE" : "DTE"} {item.dte}</span></div>
       <div className="grid grid-cols-2 gap-2">
         <Mini label="Call Wall" value={item.callWall ?? "—"} cls="text-[#EF4444]" />
         <Mini label="Put Wall" value={item.putWall ?? "—"} cls="text-[#22C55E]" />
