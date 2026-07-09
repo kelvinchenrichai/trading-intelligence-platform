@@ -109,8 +109,8 @@ async function startServer() {
       const latestCme = [...imports].sort((a, b) => {
         const dateCmp = String(b.tradeDate || "").localeCompare(String(a.tradeDate || ""));
         if (dateCmp !== 0) return dateCmp;
-        const aPreferred = a.parserVersion === "cme-pg40-v0.2.0-full-expiry-resolver" ? 1 : 0;
-        const bPreferred = b.parserVersion === "cme-pg40-v0.2.0-full-expiry-resolver" ? 1 : 0;
+        const aPreferred = a.parserVersion === "cme-pg40-v0.3.0-optiontype-column-resolver" ? 1 : 0;
+        const bPreferred = b.parserVersion === "cme-pg40-v0.3.0-optiontype-column-resolver" ? 1 : 0;
         if (aPreferred !== bPreferred) return bPreferred - aPreferred;
         return String(b.createdAt || "").localeCompare(String(a.createdAt || ""));
       })[0];

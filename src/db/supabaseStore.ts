@@ -30,7 +30,7 @@ export interface StoredRefresh {
 }
 
 const CHUNK_SIZE = 500;
-const PREFERRED_CME_PARSER_VERSION = "cme-pg40-v0.2.0-full-expiry-resolver";
+const PREFERRED_CME_PARSER_VERSION = "cme-pg40-v0.3.0-optiontype-column-resolver";
 
 function chunks<T>(input: T[], size = CHUNK_SIZE): T[][] {
   const result: T[][] = [];
@@ -101,6 +101,26 @@ export class SupabaseStore {
     }
     this.connectionError = null;
     return parsed as T;
+  }
+
+  /**
+   * Supabase/PostgREST commonly caps a single GET response at 1,000 rows even
+   * when a larger `limit` is requested.  CME PG40 imports can contain ~4,000
+   * option rows, so dashboard reads must explicitly page or the report will be
+   * built from only the first chunk and produce wrong walls / expiry counts.
+   */
+  private async requestAllRows<T>(table: string, params: Record<string, string | undefined> = {}, pageSize = 1000, maxPages = 100): Promise<T[]> {
+    const all: T[] = [];
+    for (let page = 0; page < maxPages; page++) {
+      const rows = await this.request<T[]>("GET", table, {
+        ...params,
+        limit: String(pageSize),
+        offset: String(page * pageSize),
+      });
+      all.push(...rows);
+      if (rows.length < pageSize) return all;
+    }
+    throw new Error(`Supabase ${table}: pagination exceeded ${maxPages * pageSize} rows; refusing to build a partial CME map.`);
   }
 
   async healthcheck(): Promise<void> {
@@ -259,6 +279,7 @@ export class SupabaseStore {
       contractCount: payload.contractCount,
       expirySummaries: payload.expirySummaries,
       warnings: payload.warnings,
+      debugAudit: payload.debugAudit || null,
     };
     if (!options.force) {
       const existing = await this.request<any[]>("GET", "cme_bulletin_imports", {
@@ -347,12 +368,15 @@ export class SupabaseStore {
     const latest = imports.find((row) => row.parser_version === PREFERRED_CME_PARSER_VERSION) || imports[0];
     if (!latest) return null;
 
-    const rows = await this.request<any[]>("GET", "cme_nq_option_contracts", {
+    const rows = await this.requestAllRows<any>("cme_nq_option_contracts", {
       select: "trade_date,underlying_contract,option_family,option_code,expiry_label,expiry_date,expiry_precision,option_type,strike,settlement,delta,open_interest,volume,source_page",
       import_id: `eq.${latest.id}`,
-      limit: "20000",
+      order: "source_page.asc,expiry_date.asc,option_type.asc,strike.asc",
     });
     if (!rows || rows.length === 0) return null;
+    if (Number(latest.contract_count) > 0 && rows.length < Number(latest.contract_count)) {
+      console.warn(`[cme-dashboard] Fetched ${rows.length}/${latest.contract_count} contracts for import ${latest.id}. Check Supabase pagination/settings before using this map.`);
+    }
 
     const contracts: CmeNqOptionContract[] = rows.map((r) => ({
       tradeDate: r.trade_date,

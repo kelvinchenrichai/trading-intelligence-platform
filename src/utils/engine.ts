@@ -166,6 +166,15 @@ export interface AnalyzeMarketStructureOptions {
   contractMultiplier?: number;
   gammaCalculator?: (spot: number, strike: number, tYears: number, iv: number, optionType: "call" | "put") => number;
   calculationMode?: string;
+  /**
+   * Minimum decision window around spot used for wall / flip / max-pain display.
+   * CME PG40 includes far-tail strikes that are useful for audit, but should not
+   * become the main intraday Call Wall / Put Wall / HVL when they sit far away
+   * from the current futures settlement.
+   */
+  decisionWindowMinPoints?: number;
+  /** Prefer Call Wall above spot and Put Wall below spot for tradable dashboard levels. */
+  preferDirectionalWalls?: boolean;
 }
 
 export function analyzeMarketStructure(
@@ -210,6 +219,16 @@ export function analyzeMarketStructure(
   const expectedMoveLow = Math.round(lastPrice - expectedMovePoints);
   const expectedMoveHigh = Math.round(lastPrice + expectedMovePoints);
 
+  // Decision window: main dashboard levels should be tradable, near-current
+  // strikes.  Preserve full-chain GEX below, but use this window for headline
+  // walls / flip fallback / max-pain so far-tail strikes do not pollute the map.
+  const decisionWindowPoints = Math.max(
+    expectedMovePoints,
+    options.decisionWindowMinPoints ?? lastPrice * 0.08,
+  );
+  const decisionMin = lastPrice - decisionWindowPoints;
+  const decisionMax = lastPrice + decisionWindowPoints;
+
   // 2. GEX calculation per strike at current price
   // GEX_strike = Gamma * OI * 100 * spot^2 * 0.01
   const strikesMap: Record<number, { call_gex: number; put_gex: number; oi: number }> = {};
@@ -252,8 +271,8 @@ export function analyzeMarketStructure(
   // Correct approach: recalculate total net GEX in spot +/- 8% range
   // Find zero crossing using linear interpolation
   const spotSteps: Array<{ price: number; netGex: number }> = [];
-  const minSpot = lastPrice * 0.92;
-  const maxSpot = lastPrice * 1.08;
+  const minSpot = decisionMin;
+  const maxSpot = decisionMax;
   const stepsCount = 40;
   const stepSize = (maxSpot - minSpot) / stepsCount;
 
@@ -312,24 +331,42 @@ export function analyzeMarketStructure(
   flipLevel = Math.round(flipLevel * 10) / 10;
 
   // 4. Call Wall / Put Wall
-  // Standard: Call Wall is highest positive net GEX strike, Put Wall is most negative net GEX strike
-  const sortedByGexDesc = [...gexStrikes].sort((a, b) => b.net_gex - a.net_gex);
-  const sortedByGexAsc = [...gexStrikes].sort((a, b) => a.net_gex - b.net_gex);
+  // For headline intraday levels, do not blindly use the largest absolute tail
+  // strike from the full chain.  Select from a spot-centered decision window.
+  // If enabled, prefer resistance above spot and support below spot; this mirrors
+  // how desks use Call Resistance / Put Support for the trading map.
+  const decisionStrikes = gexStrikes.filter((s) => s.strike >= decisionMin && s.strike <= decisionMax);
+  const positiveInWindow = decisionStrikes.filter((s) => s.net_gex > 0);
+  const negativeInWindow = decisionStrikes.filter((s) => s.net_gex < 0);
+  const callUniverse = options.preferDirectionalWalls
+    ? positiveInWindow.filter((s) => s.strike >= lastPrice)
+    : positiveInWindow;
+  const putUniverse = options.preferDirectionalWalls
+    ? negativeInWindow.filter((s) => s.strike <= lastPrice)
+    : negativeInWindow;
 
-  const callWalls = [
-    { strike: sortedByGexDesc[0]?.strike || lastPrice * 1.02, rank: 1, gex: sortedByGexDesc[0]?.net_gex || 0 },
-    { strike: sortedByGexDesc[1]?.strike || lastPrice * 1.04, rank: 2, gex: sortedByGexDesc[1]?.net_gex || 0 },
-  ];
+  const sortedByGexDesc = (callUniverse.length ? callUniverse : positiveInWindow.length ? positiveInWindow : decisionStrikes)
+    .slice()
+    .sort((a, b) => b.net_gex - a.net_gex || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
+  const sortedByGexAsc = (putUniverse.length ? putUniverse : negativeInWindow.length ? negativeInWindow : decisionStrikes)
+    .slice()
+    .sort((a, b) => a.net_gex - b.net_gex || Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
 
-  const putWalls = [
-    { strike: sortedByGexAsc[0]?.strike || lastPrice * 0.98, rank: 1, gex: sortedByGexAsc[0]?.net_gex || 0 },
-    { strike: sortedByGexAsc[1]?.strike || lastPrice * 0.96, rank: 2, gex: sortedByGexAsc[1]?.net_gex || 0 },
-  ];
+  const nearestActualStrikes = (decisionStrikes.length ? decisionStrikes : gexStrikes)
+    .slice()
+    .sort((a, b) => Math.abs(a.strike - lastPrice) - Math.abs(b.strike - lastPrice));
+  const wallFrom = (items: GexStrikeData[], rank: number) => {
+    const item = items[rank - 1] ?? nearestActualStrikes[rank - 1] ?? nearestActualStrikes[0];
+    return { strike: item?.strike ?? lastPrice, rank, gex: item?.net_gex ?? 0 };
+  };
+
+  const callWalls = [wallFrom(sortedByGexDesc, 1), wallFrom(sortedByGexDesc, 2)];
+  const putWalls = [wallFrom(sortedByGexAsc, 1), wallFrom(sortedByGexAsc, 2)];
 
   // 5. Max Pain
   let maxPain = lastPrice;
   let minPainValue = Infinity;
-  const candidateStrikes = gexStrikes.map((s) => s.strike);
+  const candidateStrikes = (decisionStrikes.length ? decisionStrikes : gexStrikes).map((s) => s.strike);
 
   for (const sCand of candidateStrikes) {
     let totalPain = 0;
@@ -379,7 +416,7 @@ export function analyzeMarketStructure(
     } else {
       quadrant = "trending";
       label = "趨勢/擴張";
-      rationale = `處於負 Gamma 深度擴張區。做市商處於 Short Gamma 狀態, 必須順著趨勢方向進行對沖 (價格下跌則賣出期貨, 價格上漲則買入期貨), 這種順勢對沖行為將極大放大日內趨勢。突破 ${lastPrice < flipLevel ? "Put Wall 支撐後恐加速下行" : "Call Wall 後恐加速上行"}，維持強趨勢擴張預期。`;
+      rationale = `處於負 Gamma 擴張敏感區。做市商 Short Gamma 會放大已確認的盤中方向，但負 Gamma 本身不等於看多或看空。需等待 2×5m close、BOS、VWAP/AVWAP 確認；突破 ${lastPrice < flipLevel ? "Put Wall 支撐後偏下行擴張" : "Call Wall 後偏上行擴張"} 才提升方向信念。`;
     }
   }
 
@@ -393,8 +430,8 @@ export function analyzeMarketStructure(
     planNotes.push(`【嚴防破位】關注 ${distToCallWall < distToPutWall ? `Call Wall ${callWalls[0].strike}` : `Put Wall ${putWalls[0].strike}`} 的防守情況。一旦放量突破且站穩 15 分鐘，做市商將不得不空頭平倉/買入對沖，產生擠壓效應。`);
     planNotes.push(`【分批防禦】在邊牆附近，如果沒有突破訊號，可以嘗試輕倉反手，但必須嚴格以牆外 0.3% 作為止損線。`);
   } else if (quadrant === "trending") {
-    planNotes.push(`【順勢而為】做市商 Short Gamma 自動對沖將不斷放大價格波幅。建議順日內趨勢交易，不輕易抄底。`);
-    planNotes.push(`【關鍵阻力/支撐】若在 Flip 零軸下方執行，反彈至 Flip 級別 (${flipLevel}) 均是強阻力做空機會；下行關注 Expected Move 邊緣 (${expectedMoveLow}) 止盈。`);
+    planNotes.push(`【等待確認】Short Gamma 會放大盤中已確認方向，但不可把負 GEX 直接解讀成單邊看多/看空。`);
+    planNotes.push(`【關鍵阻力/支撐】先觀察 Flip (${flipLevel})、Call Wall (${callWalls[0].strike})、Put Wall (${putWalls[0].strike}) 的 2×5m close、BOS、VWAP/AVWAP 確認，再判斷擴張方向。`);
     planNotes.push(`【波動率飆升】當前 VIX (${macro.VIX}) 處於活躍水平，Short Gamma 環境下日內寬幅震盪加劇，建議降低單筆頭寸，放大止損。`);
   } else {
     planNotes.push(`【觀望為宜】貼近 Gamma Flip 零軸 (${flipLevel})。價格在此容易產生無邏輯的上下插針掃損，不是乾淨的開倉點位。`);
@@ -417,7 +454,7 @@ export function analyzeMarketStructure(
     signals.push({ text: "貼近 Gamma Flip 零軸 (方向不明)", weight: -1 });
   }
   if (status === "negative") {
-    signals.push({ text: "負 Gamma 環境 (助漲助跌，趨勢延續)", weight: 1 });
+    signals.push({ text: "負 Gamma 環境 (助漲助跌，方向需盤中確認)", weight: 0 });
   } else {
     signals.push({ text: "正 Gamma 環境 (抑制波動，區間震盪)", weight: 1 });
   }
@@ -483,6 +520,7 @@ export function analyzeMarketStructure(
     gross_gex: gexStrikes.reduce((acc, s) => acc + Math.abs(s.net_gex), 0),
     total_net_gex: totalNetGex,
     top_abs_gex_strikes: [...gexStrikes]
+      .filter((s) => s.strike >= decisionMin && s.strike <= decisionMax)
       .sort((a, b) => Math.abs(b.net_gex) - Math.abs(a.net_gex))
       .slice(0, 20)
       .map((s, index) => ({ strike: s.strike, gex: s.net_gex, rank: index + 1 })),

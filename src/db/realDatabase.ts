@@ -220,8 +220,14 @@ export class RealMarketDatabase {
     } : { VIX: 0, DXY: 0, US10Y: 4.0 });
 
     const cme = computeCmeGex(cmeData.contracts, cmeData.futuresSettlement);
-    const cmeConfidence: "high" | "medium" | "low" =
-      cme.ivReconstructedPct >= 70 ? "high" : cme.ivReconstructedPct >= 40 ? "medium" : "low";
+    const cmeExpiryCount = new Set(cmeData.contracts.map((contract) => contract.expiryDate)).size;
+    const rowCoverageLow = cmeData.contracts.length < 1500 || cmeExpiryCount < 6;
+    const rowCoverageMedium = cmeData.contracts.length < 2500 || cmeExpiryCount < 10;
+    const cmeConfidence: "high" | "medium" | "low" = rowCoverageLow
+      ? "low"
+      : rowCoverageMedium
+        ? "medium"
+        : cme.ivReconstructedPct >= 70 ? "high" : cme.ivReconstructedPct >= 40 ? "medium" : "low";
     const cmeReport = analyzeCmeResolved(
       cmeData.underlyingContract,
       cmeData.tradeDate,
@@ -251,6 +257,7 @@ export class RealMarketDatabase {
       sourceWarnings: [
         ...cmeData.warnings,
         `CME Black-76 futures-options engine used with NQ multiplier 20. IV reconstruction coverage ${cme.ivReconstructedPct}%.`,
+        ...(rowCoverageMedium ? [`CME parser coverage check: fetched ${cmeData.contracts.length} rows across ${cmeExpiryCount} expiry groups; full-chain target is roughly 3,000–4,000 rows and 15–20 expiry groups. Treat headline walls as provisional until coverage is complete.`] : []),
         "CME PG40 was user-uploaded and is rendered directly from the selected import; it is not live intraday options flow.",
         ...(proxyReport ? ["NDX proxy snapshot is retained only as Layer 2 confluence, not as CME futures options OI consensus."] : ["No same-date NDX proxy refresh row was available; dashboard is showing Layer 1 CME PG40 only."]),
       ],
@@ -411,7 +418,14 @@ export class RealMarketDatabase {
             const cmeData = await this.config.store.getCmeContractsByTradeDate(result.snapshotDate);
             if (cmeData && cmeData.contracts.length > 0 && cmeData.futuresSettlement > 0) {
               const cme = computeCmeGex(cmeData.contracts, cmeData.futuresSettlement);
-              const cmeConfidence: "high" | "medium" | "low" = cme.ivReconstructedPct >= 70 ? "high" : cme.ivReconstructedPct >= 40 ? "medium" : "low";
+              const cmeExpiryCount = new Set(cmeData.contracts.map((contract) => contract.expiryDate)).size;
+              const rowCoverageLow = cmeData.contracts.length < 1500 || cmeExpiryCount < 6;
+              const rowCoverageMedium = cmeData.contracts.length < 2500 || cmeExpiryCount < 10;
+              const cmeConfidence: "high" | "medium" | "low" = rowCoverageLow
+                ? "low"
+                : rowCoverageMedium
+                  ? "medium"
+                  : cme.ivReconstructedPct >= 70 ? "high" : cme.ivReconstructedPct >= 40 ? "medium" : "low";
               const cmeReport = analyzeCmeResolved(
                 cmeData.underlyingContract,
                 cmeData.tradeDate,

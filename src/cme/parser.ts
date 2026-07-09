@@ -17,10 +17,10 @@ import { promisify } from "util";
 import { CmeExpirySummary, CmeNqImportResult, CmeNqOptionContract, CmeOptionType } from "./types";
 
 const execFileAsync = promisify(execFile);
-export const CME_PARSER_VERSION = "cme-pg40-v0.2.0-full-expiry-resolver";
+export const CME_PARSER_VERSION = "cme-pg40-v0.3.0-optiontype-column-resolver";
 
-type Word = { x: number; y: number; text: string; page: number };
-type PdfLine = { y: number; page: number; words: Word[]; text: string };
+type Word = { x: number; rawX: number; y: number; text: string; page: number; column: number };
+type PdfLine = { y: number; page: number; column: number; words: Word[]; text: string };
 type Context = {
   /** Human CME section name, for example E-MINI NASDAQ 100 WEEKLY-2 or DMQ MID. */
   family: string;
@@ -149,32 +149,85 @@ function inferExpiry(tradeDate: string, family: string, monthLabel: string | nul
   return { expiryDate: isoDate(addBusinessDays(trade, 1)), precision: "estimated", label: family };
 }
 
-function parseBboxXml(xml: string): PdfLine[] {
-  const words: Word[] = [];
-  const pageParts = xml.split(/<page\b[^>]*>/i).slice(1);
-  pageParts.forEach((pagePart, pageIndex) => {
-    const wordRegex = /<word\s+([^>]*)>([\s\S]*?)<\/word>/gi;
-    let match: RegExpExecArray | null;
-    while ((match = wordRegex.exec(pagePart))) {
-      const attrs = match[1];
-      const xMatch = attrs.match(/xMin="([^"]+)"/i);
-      const yMatch = attrs.match(/yMin="([^"]+)"/i);
-      if (!xMatch || !yMatch) continue;
-      words.push({ x: Number(xMatch[1]), y: Number(yMatch[1]), text: unescapeHtml(match[2]).trim(), page: pageIndex + 1 });
-    }
-  });
-  const ordered = words.filter((word) => word.text).sort((a, b) => a.page - b.page || a.y - b.y || a.x - b.x);
+function uniqueNumbers(values: number[], tolerance = 18): number[] {
+  const sorted = [...values].filter(Number.isFinite).sort((a, b) => a - b);
+  const out: number[] = [];
+  for (const value of sorted) {
+    const last = out.at(-1);
+    if (last === undefined || Math.abs(value - last) > tolerance) out.push(value);
+  }
+  return out;
+}
+
+function buildLines(words: Word[]): PdfLine[] {
+  const ordered = words.filter((word) => word.text).sort((a, b) => a.page - b.page || a.column - b.column || a.y - b.y || a.x - b.x);
   const lines: PdfLine[] = [];
   for (const word of ordered) {
     const last = lines.at(-1);
-    if (last && last.page === word.page && Math.abs(last.y - word.y) <= 0.7) {
+    if (last && last.page === word.page && last.column === word.column && Math.abs(last.y - word.y) <= 0.7) {
       last.words.push(word);
       last.y = Math.min(last.y, word.y);
       continue;
     }
-    lines.push({ y: word.y, page: word.page, words: [word], text: "" });
+    lines.push({ y: word.y, page: word.page, column: word.column, words: [word], text: "" });
   }
-  return lines.map((line) => ({ ...line, words: line.words.sort((a, b) => a.x - b.x), text: line.words.sort((a, b) => a.x - b.x).map((word) => word.text).join(" ") }));
+  return lines.map((line) => {
+    const sortedWords = line.words.sort((a, b) => a.x - b.x);
+    return { ...line, words: sortedWords, text: sortedWords.map((word) => word.text).join(" ") };
+  });
+}
+
+function parseBboxXml(xml: string): PdfLine[] {
+  const lines: PdfLine[] = [];
+  const pageRegex = /<page\s+([^>]*)>([\s\S]*?)(?=<page\b|<\/doc>|$)/gi;
+  let pageMatch: RegExpExecArray | null;
+  let pageIndex = 0;
+
+  while ((pageMatch = pageRegex.exec(xml))) {
+    pageIndex += 1;
+    const pageBody = pageMatch[2];
+    const rawWords: Array<Omit<Word, "x" | "column">> = [];
+    const wordRegex = /<word\s+([^>]*)>([\s\S]*?)<\/word>/gi;
+    let match: RegExpExecArray | null;
+    while ((match = wordRegex.exec(pageBody))) {
+      const attrs = match[1];
+      const xMatch = attrs.match(/xMin="([^"]+)"/i);
+      const yMatch = attrs.match(/yMin="([^"]+)"/i);
+      if (!xMatch || !yMatch) continue;
+      const text = unescapeHtml(match[2]).trim();
+      if (!text) continue;
+      rawWords.push({ rawX: Number(xMatch[1]), y: Number(yMatch[1]), text, page: pageIndex });
+    }
+
+    // CME PG40 can use two side-by-side tables on the same page.  The old parser
+    // merged both physical columns into one y-line and only read x<50, silently
+    // dropping the right table.  Use the STRIKE header positions as column anchors,
+    // then normalize x inside each detected table column.
+    const strikeAnchors = uniqueNumbers(
+      rawWords.filter((word) => /^STRIKE$/i.test(word.text)).map((word) => word.rawX),
+      35,
+    );
+    const anchors = strikeAnchors.length >= 2 ? strikeAnchors : [strikeAnchors[0] ?? 0];
+    const normalized: Word[] = [];
+
+    for (const word of rawWords) {
+      let column = 0;
+      for (let i = 0; i < anchors.length; i++) {
+        const leftBoundary = i === 0 ? -Infinity : (anchors[i - 1] + anchors[i]) / 2;
+        const rightBoundary = i === anchors.length - 1 ? Infinity : (anchors[i] + anchors[i + 1]) / 2;
+        if (word.rawX >= leftBoundary && word.rawX < rightBoundary) {
+          column = i;
+          break;
+        }
+      }
+      const anchor = anchors[column] ?? 0;
+      normalized.push({ ...word, x: word.rawX - anchor, column });
+    }
+
+    lines.push(...buildLines(normalized));
+  }
+
+  return lines.sort((a, b) => a.page - b.page || a.y - b.y || a.column - b.column);
 }
 
 async function extractLines(pdfBuffer: Buffer): Promise<PdfLine[]> {
@@ -209,6 +262,12 @@ function findFutureSettlement(lines: PdfLine[]): { contract: string; settlement:
   throw new Error("Could not parse the front E-mini Nasdaq futures settlement.");
 }
 
+function optionTypeFromText(text: string, fallback: CmeOptionType = "call"): CmeOptionType {
+  if (/\bP(?:UTS?)?\b/.test(text)) return "put";
+  if (/\bC(?:ALLS?)?\b/.test(text)) return "call";
+  return fallback;
+}
+
 function detectContext(line: PdfLine, current: Context | null): Context | null {
   const text = line.text.toUpperCase();
   // Main and auxiliary Section 40 tables.  v0.1 only caught E-MINI WEEKLY
@@ -221,12 +280,12 @@ function detectContext(line: PdfLine, current: Context | null): Context | null {
     /^\s*EMINI NASD\s+(CALL|PUT)\s*$/.test(text) ||
     /^(NASDAQ 100 WEEKLY-\d|E-MINI NASDAQ 100 WEEKLY-\d|ADDITIONAL NASDAQ|MINI NSDQ EOM)/.test(text)
   );
-  if (isSectionHeader && /NASDAQ|NASD|NSDQ/.test(text) && !/RUSSELL|RTY|MICRO/.test(text) && /(CALLS|PUTS|\bCALL\b|\bPUT\b|EOM)/.test(text)) {
-    const optionType: CmeOptionType = /PUTS/.test(text) ? "put" : "call";
-    let family = text.replace(/\s+/g, " ").replace(/\s+(CALLS|PUTS)$/, "").replace(/\s+\b(CALL|PUT)\b.*$/, "").trim();
+  if (isSectionHeader && /NASDAQ|NASD|NSDQ/.test(text) && !/RUSSELL|RTY|MICRO/.test(text) && /(CALLS?|PUTS?|\b[CP]\b|EOM)/.test(text)) {
+    const optionType = optionTypeFromText(text, current?.optionType ?? "call");
+    let family = text.replace(/\s+/g, " ").replace(/\s+(CALLS|PUTS)$/, "").replace(/\s+\b(CALL|PUT)\b.*$/, "").replace(/\s+[CP]\b.*$/, "").trim();
     if (/ADDITIONAL NASDAQ/.test(text)) family = "ADDITIONAL NASDAQ";
-    if (/MINI NSDQ EOM\s+C\b/.test(text)) family = "MINI NSDQ EOM";
-    if (/MINI NSDQ EOM\s+P\b/.test(text)) family = "MINI NSDQ EOM";
+    if (/MINI NSDQ EOM\s+C\b/.test(text)) return { family: "MINI NSDQ EOM", optionType: "call", optionCode: "EOM", monthLabel: null, parentSection: text };
+    if (/MINI NSDQ EOM\s+P\b/.test(text)) return { family: "MINI NSDQ EOM", optionType: "put", optionCode: "EOM", monthLabel: null, parentSection: text };
     return { family, optionType, optionCode: null, monthLabel: null, parentSection: text };
   }
   if (!current) return current;
@@ -234,26 +293,43 @@ function detectContext(line: PdfLine, current: Context | null): Context | null {
   const code = joined.match(/^\s*([A-Z0-9]{2,4})\s+(CALL|PUT|MID|MON|TUE|WED|THUR|THU)\b/);
   if (code && !/^(TOTAL|OPEN|HIGH|LOW|STRIKE)$/.test(code[1])) {
     const descriptor = code[2] === "THUR" ? "THUR" : code[2];
-    return { ...current, family: `${code[1]} ${descriptor}`, optionCode: code[1], monthLabel: null };
+    const newType: CmeOptionType = code[2] === "PUT" ? "put" : code[2] === "CALL" ? "call" : current.optionType;
+    return { ...current, optionType: newType, family: `${code[1]} ${descriptor}`, optionCode: code[1], monthLabel: null };
   }
   if (/^\s*MINI NSDQ EOM\s+[CP]\b/.test(joined)) {
-    return { ...current, family: "MINI NSDQ EOM", optionCode: "EOM", monthLabel: null };
+    const newType: CmeOptionType = /\bP\b/.test(joined) ? "put" : "call";
+    return { ...current, optionType: newType, family: "MINI NSDQ EOM", optionCode: "EOM", monthLabel: null };
   }
-  const month = line.words.find((word) => word.x < 60 && /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}$/i.test(word.text))?.text;
+  const month = line.words.find((word) => word.x < 90 && /^(JAN|FEB|MAR|APR|MAY|JUN|JUL|AUG|SEP|OCT|NOV|DEC)\d{2}$/i.test(word.text))?.text;
   if (month) return { ...current, monthLabel: month.toUpperCase() };
   return current;
 }
 
-function parseRow(line: PdfLine, context: Context, tradeDate: string, underlyingContract: string): CmeNqOptionContract | null {
-  const strikeWord = line.words.find((word) => word.x < 50 && /^\d{4,5}(?:\.\d+)?$/.test(word.text));
-  if (!strikeWord) return null;
+type ParsedRowResult = { row: CmeNqOptionContract | null; reason?: string };
+
+function findNumericWordByOffset(words: Word[], originX: number, minOffset: number, maxOffset: number): Word | undefined {
+  const candidates = words
+    .filter((word) => {
+      const offset = word.x - originX;
+      return offset >= minOffset && offset <= maxOffset && /\d/.test(word.text);
+    })
+    .sort((a, b) => Math.abs(a.x - originX - (minOffset + maxOffset) / 2) - Math.abs(b.x - originX - (minOffset + maxOffset) / 2));
+  return candidates[0];
+}
+
+function parseRowAtStrike(line: PdfLine, context: Context, tradeDate: string, underlyingContract: string, strikeWord: Word): ParsedRowResult {
   const strike = asNumber(strikeWord.text);
-  if (!strike || strike < 10_000 || strike > 50_000) return null;
-  const settlement = asNumber(line.words.find((word) => word.x >= 290 && word.x < 350)?.text);
-  const delta = asNumber(line.words.find((word) => word.x >= 365 && word.x < 410)?.text);
-  const volume = asNumber(line.words.find((word) => word.x >= 425 && word.x < 468)?.text) ?? 0;
-  const oi = asNumber(line.words.find((word) => word.x >= 468 && word.x < 505)?.text);
-  if (oi === null) return null;
+  if (!strike || strike < 10_000 || strike > 50_000) return { row: null, reason: "strike_out_of_range" };
+  const x0 = strikeWord.x;
+  const settlementWord = findNumericWordByOffset(line.words, x0, 220, 345);
+  const deltaWord = findNumericWordByOffset(line.words, x0, 320, 430);
+  const volumeWord = findNumericWordByOffset(line.words, x0, 385, 485);
+  const oiWord = findNumericWordByOffset(line.words, x0, 445, 545);
+  const settlement = asNumber(settlementWord?.text);
+  const delta = asNumber(deltaWord?.text);
+  const volume = asNumber(volumeWord?.text) ?? 0;
+  const oi = asNumber(oiWord?.text);
+  if (oi === null) return { row: null, reason: "missing_open_interest" };
   const inferred = inferExpiry(tradeDate, context.family, context.monthLabel);
   const sectionType = /WEEKLY-\d/.test(context.family)
     ? context.family.match(/WEEKLY-\d/)?.[0] || "WEEKLY"
@@ -263,30 +339,51 @@ function parseRow(line: PdfLine, context: Context, tradeDate: string, underlying
         ? "DAILY"
         : "MONTHLY";
   return {
-    tradeDate,
-    underlyingContract,
-    optionFamily: context.family,
-    optionCode: context.optionCode,
-    expiryLabel: `${inferred.expiryDate} · ${sectionType} · ${context.monthLabel || "UNKNOWN"} · ${inferred.label}`,
-    expiryDate: inferred.expiryDate,
-    expiryPrecision: inferred.precision,
-    optionType: context.optionType,
-    strike,
-    settlement,
-    delta,
-    openInterest: Math.round(oi),
-    volume: Math.round(volume),
-    sourcePage: line.page,
-    rawRow: {
-      text: line.text,
-      page: line.page,
-      xStrike: strikeWord.x,
-      settlementWord: line.words.find((word) => word.x >= 290 && word.x < 350)?.text || null,
-      sectionType,
+    row: {
+      tradeDate,
+      underlyingContract,
+      optionFamily: context.family,
       optionCode: context.optionCode,
-      parentSection: context.parentSection,
+      expiryLabel: `${inferred.expiryDate} · ${sectionType} · ${context.monthLabel || "UNKNOWN"} · ${inferred.label}`,
+      expiryDate: inferred.expiryDate,
+      expiryPrecision: inferred.precision,
+      optionType: context.optionType,
+      strike,
+      settlement,
+      delta,
+      openInterest: Math.round(oi),
+      volume: Math.round(volume),
+      sourcePage: line.page,
+      rawRow: {
+        text: line.text,
+        page: line.page,
+        column: line.column,
+        xStrike: strikeWord.x,
+        rawXStrike: strikeWord.rawX,
+        settlementWord: settlementWord?.text || null,
+        deltaWord: deltaWord?.text || null,
+        volumeWord: volumeWord?.text || null,
+        oiWord: oiWord?.text || null,
+        sectionType,
+        optionCode: context.optionCode,
+        parentSection: context.parentSection,
+      },
     },
   };
+}
+
+function parseLineRows(line: PdfLine, context: Context, tradeDate: string, underlyingContract: string): ParsedRowResult[] {
+  // After column normalization, a valid strike is near the left side of that
+  // physical table column.  This deliberately avoids interpreting OI/volume as
+  // another strike when a two-column PDF row has been merged by the extractor.
+  const strikeWords = line.words.filter((word) => {
+    if (word.x < -45 || word.x > 130) return false;
+    if (!/^\d{4,5}(?:\.\d+)?$/.test(word.text)) return false;
+    const strike = asNumber(word.text);
+    return !!strike && strike >= 10_000 && strike <= 50_000;
+  });
+  if (!strikeWords.length) return [{ row: null }];
+  return strikeWords.map((strikeWord) => parseRowAtStrike(line, context, tradeDate, underlyingContract, strikeWord));
 }
 
 function summarize(contracts: CmeNqOptionContract[], futuresSettlement: number): CmeExpirySummary[] {
@@ -317,6 +414,14 @@ function summarize(contracts: CmeNqOptionContract[], futuresSettlement: number):
   }).sort((a, b) => b.totalOpenInterest - a.totalOpenInterest);
 }
 
+function countBy<T extends string | number>(items: CmeNqOptionContract[], pick: (item: CmeNqOptionContract) => T): Record<string, number> {
+  return items.reduce<Record<string, number>>((acc, item) => {
+    const key = String(pick(item));
+    acc[key] = (acc[key] || 0) + 1;
+    return acc;
+  }, {});
+}
+
 export async function parseCmeSection40(pdfBuffer: Buffer, fileName: string): Promise<CmeNqImportResult> {
   if (pdfBuffer.subarray(0, 4).toString("ascii") !== "%PDF") throw new Error("Only PDF files are accepted.");
   const lines = await extractLines(pdfBuffer);
@@ -325,16 +430,38 @@ export async function parseCmeSection40(pdfBuffer: Buffer, fileName: string): Pr
   }
   const bulletin = parseBulletinDate(lines);
   const future = findFutureSettlement(lines);
-  let context: Context | null = null;
+  const contextByColumn = new Map<string, Context | null>();
+  let lastAnyContext: Context | null = null;
   const contracts: CmeNqOptionContract[] = [];
+  const rejectedRowReasons: Record<string, number> = {};
   for (const line of lines) {
-    context = detectContext(line, context);
+    const contextKey = String(line.column);
+    const previous = contextByColumn.get(contextKey) ?? lastAnyContext;
+    const context = detectContext(line, previous);
+    contextByColumn.set(contextKey, context);
+    if (context) lastAnyContext = context;
     if (!context) continue;
-    const row = parseRow(line, context, bulletin.date, future.contract);
-    if (row) contracts.push(row);
+    const results = parseLineRows(line, context, bulletin.date, future.contract);
+    for (const result of results) {
+      if (result.row) {
+        contracts.push(result.row);
+      } else if (result.reason) {
+        rejectedRowReasons[result.reason] = (rejectedRowReasons[result.reason] || 0) + 1;
+      }
+    }
   }
-  const deduped = [...new Map(contracts.map((contract) => [`${contract.optionFamily}|${contract.optionType}|${contract.expiryLabel}|${contract.strike}|${contract.sourcePage}`, contract])).values()];
+  const deduped = [...new Map(contracts.map((contract) => [`${contract.optionFamily}|${contract.optionType}|${contract.expiryLabel}|${contract.strike}|${contract.sourcePage}|${contract.rawRow.column}`, contract])).values()];
   if (deduped.length < 100) throw new Error(`Parser found only ${deduped.length} NQ option rows. The PDF format may have changed; do not use this import for analysis.`);
+  const debugAudit = {
+    pdfPageCount: Math.max(...lines.map((line) => line.page), 0),
+    extractedLineCount: lines.length,
+    rawParsedRowCount: contracts.length,
+    dedupedRowCount: deduped.length,
+    parsedRowCountByPage: countBy(deduped, (row) => row.sourcePage),
+    parsedRowCountByOptionFamily: countBy(deduped, (row) => `${row.optionFamily} · ${row.optionType}`),
+    parsedRowCountByExpiryDate: countBy(deduped, (row) => row.expiryDate),
+    rejectedRowReasons,
+  };
   const warnings = [
     "CME PDF is user-uploaded; this platform does not automatically download or scrape CME data.",
     "Weekly/daily expiry dates are model estimates until an exact contract-calendar resolver is validated. Do not treat preliminary gamma metrics as final trading signals.",
@@ -351,6 +478,7 @@ export async function parseCmeSection40(pdfBuffer: Buffer, fileName: string): Pr
     contractCount: deduped.length,
     expirySummaries: summarize(deduped, future.settlement),
     warnings,
+    debugAudit,
     contracts: deduped,
   };
 }

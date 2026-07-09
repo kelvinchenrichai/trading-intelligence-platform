@@ -94,6 +94,47 @@ export interface CmeGexResult {
 
 const FALLBACK_IV = 0.15;
 
+
+function median(values: number[]): number | null {
+  const sorted = values.filter((v) => Number.isFinite(v) && v > 0).sort((a, b) => a - b);
+  if (!sorted.length) return null;
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+}
+
+function clampIv(iv: number): number {
+  if (!Number.isFinite(iv) || iv <= 0) return FALLBACK_IV;
+  return Math.min(2.5, Math.max(0.03, iv));
+}
+
+function interpolateIv(
+  strike: number,
+  known: Array<{ strike: number; iv: number }>,
+  expiryMedian: number | null,
+  globalMedian: number | null,
+): number {
+  const sorted = known
+    .filter((item) => Number.isFinite(item.iv) && item.iv > 0)
+    .sort((a, b) => a.strike - b.strike);
+  if (sorted.length) {
+    let left: { strike: number; iv: number } | null = null;
+    let right: { strike: number; iv: number } | null = null;
+    for (const item of sorted) {
+      if (item.strike <= strike) left = item;
+      if (item.strike >= strike) {
+        right = item;
+        break;
+      }
+    }
+    if (left && right && left.strike !== right.strike) {
+      const t = (strike - left.strike) / (right.strike - left.strike);
+      return clampIv(left.iv + t * (right.iv - left.iv));
+    }
+    return clampIv((left ?? right ?? sorted[0]).iv);
+  }
+  return clampIv(expiryMedian ?? globalMedian ?? FALLBACK_IV);
+}
+
 /**
  * 把 CME 合約轉成 resolved options (含 Black-76 gamma)。
  * @param contracts 某一 tradeDate 的全部 CME NQ 期權合約
@@ -105,44 +146,68 @@ export function computeCmeGex(
 ): CmeGexResult {
   const tradeDate = contracts[0]?.tradeDate || "";
   const F = futuresSettlement;
-  const resolved: ResolvedOption[] = [];
   let ivOk = 0, ivTotal = 0;
+
+  const staged: Array<{
+    contract: CmeNqOptionContract;
+    T: number;
+    directIv: number | null;
+  }> = [];
 
   for (const c of contracts) {
     if (!c.strike || c.openInterest <= 0) continue;
-    // T:到期天數 / 365 (至少給半天,避免除零)
     const tDays = Math.max(
       0.5,
       (new Date(c.expiryDate).getTime() - new Date(c.tradeDate).getTime()) / 86400000,
     );
     const T = tDays / 365;
-
-    // IV:優先用 settlement 反解;失敗退回預設
     ivTotal++;
-    let iv: number | null = null;
+    let directIv: number | null = null;
     if (typeof c.settlement === "number" && c.settlement > 0) {
-      iv = impliedVol(c.settlement, F, c.strike, T, c.optionType);
+      directIv = impliedVol(c.settlement, F, c.strike, T, c.optionType);
     }
-    if (iv === null) {
-      iv = FALLBACK_IV;
-    } else {
-      ivOk++;
-    }
+    if (directIv !== null) ivOk++;
+    staged.push({ contract: c, T, directIv });
+  }
 
-    const gamma = black76Gamma(F, c.strike, T, iv);
-    resolved.push({
+  // Do not apply a flat 15% IV to every failed far-tail contract.  First build a
+  // per-expiry IV smile from contracts whose settlement can be inverted, then
+  // interpolate missing strikes.  Only when an expiry has no usable IV at all do
+  // we fall back to the global median / final conservative default.
+  const knownByExpiry = new Map<string, Array<{ strike: number; iv: number }>>();
+  const allKnownIv: number[] = [];
+  for (const item of staged) {
+    if (item.directIv === null) continue;
+    const iv = clampIv(item.directIv);
+    allKnownIv.push(iv);
+    const key = item.contract.expiryDate;
+    knownByExpiry.set(key, [...(knownByExpiry.get(key) || []), { strike: item.contract.strike, iv }]);
+  }
+  const globalMedian = median(allKnownIv);
+  const expiryMedian = new Map<string, number | null>();
+  for (const [expiry, known] of knownByExpiry.entries()) {
+    expiryMedian.set(expiry, median(known.map((item) => item.iv)));
+  }
+
+  const resolved: ResolvedOption[] = staged.map((item) => {
+    const c = item.contract;
+    const known = knownByExpiry.get(c.expiryDate) || [];
+    const iv = item.directIv !== null
+      ? clampIv(item.directIv)
+      : interpolateIv(c.strike, known, expiryMedian.get(c.expiryDate) ?? null, globalMedian);
+    const gamma = black76Gamma(F, c.strike, item.T, iv);
+    return {
       expiry: c.expiryDate,
       strike: c.strike,
       option_type: c.optionType,
       oi: c.openInterest,
       iv,
       gamma,
-    });
-  }
+    };
+  });
 
   resolved.sort((a, b) => (a.expiry === b.expiry ? a.strike - b.strike : a.expiry < b.expiry ? -1 : 1));
 
-  // 最近到期日 (供 0DTE / 開盤前參考)
   const expiries = Array.from(new Set(resolved.map((r) => r.expiry))).sort();
   const nearestExpiryDate = expiries[0] || null;
   const nearestExpiryResolved = nearestExpiryDate
