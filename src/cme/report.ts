@@ -162,6 +162,112 @@ function summarizeExpiry(label: string, expiryDate: string, targetSessionDate: s
   };
 }
 
+function roundToNearest(value: number, step = 5): number {
+  return Math.round(value / step) * step;
+}
+
+function nearestProfileFlip(strikes: DailyReport["gamma"]["gex_strikes"], spot: number, windowPoints: number): number | null {
+  const near = [...strikes]
+    .filter((s) => Math.abs(s.strike - spot) <= windowPoints)
+    .sort((a, b) => a.strike - b.strike);
+  for (let i = 1; i < near.length; i++) {
+    const a = near[i - 1];
+    const b = near[i];
+    if (!a || !b) continue;
+    if (a.net_gex === 0) return a.strike;
+    if ((a.net_gex < 0 && b.net_gex > 0) || (a.net_gex > 0 && b.net_gex < 0)) {
+      const denom = Math.abs(a.net_gex) + Math.abs(b.net_gex);
+      const t = denom > 0 ? Math.abs(a.net_gex) / denom : 0.5;
+      return roundToNearest(a.strike + t * (b.strike - a.strike), 1);
+    }
+  }
+  return null;
+}
+
+function strongestStrikeInBand(
+  strikes: DailyReport["gamma"]["gex_strikes"],
+  minStrike: number,
+  maxStrike: number,
+  side: "call" | "put",
+  anchor?: number | null,
+): number | null {
+  const candidates = strikes
+    .filter((s) => s.strike >= minStrike && s.strike <= maxStrike)
+    .filter((s) => side === "call" ? s.call_gex > 0 || s.net_gex > 0 : s.put_gex < 0 || s.net_gex < 0);
+  if (!candidates.length) return null;
+  const anchorLevel = anchor ?? ((minStrike + maxStrike) / 2);
+  const scored = candidates
+    .map((s) => {
+      const exposure = side === "call" ? Math.max(Math.abs(s.call_gex), Math.abs(s.net_gex)) : Math.max(Math.abs(s.put_gex), Math.abs(s.net_gex));
+      // MenthorQ-style intraday walls are not always the absolute-largest tail
+      // blob; favor meaningful exposure that sits near the expected tradable
+      // path / benchmark anchor.
+      const distancePenalty = 1 + Math.abs(s.strike - anchorLevel) / Math.max(50, Math.abs(maxStrike - minStrike));
+      return { strike: s.strike, score: exposure / distancePenalty };
+    })
+    .sort((a, b) => b.score - a.score || Math.abs(a.strike - anchorLevel) - Math.abs(b.strike - anchorLevel));
+  return scored[0]?.strike ?? null;
+}
+
+function alignExpirySummaryToMenthorqStyle(
+  summary: ExpiryGexSummary,
+  allReport: DailyReport,
+): ExpiryGexSummary {
+  const spot = allReport.price.last;
+  const em = Math.max(200, allReport.price.expected_move.points || 400);
+  const allFlip = allReport.gamma.flip_level;
+  const allCall = allReport.gamma.call_walls[0]?.strike ?? null;
+  const allPut = allReport.gamma.put_walls[0]?.strike ?? null;
+  const currentCall = summary.callWall;
+  const currentPut = summary.putWall;
+  let callWall = currentCall;
+  let putWall = currentPut;
+  let gammaFlip = summary.gammaFlip;
+
+  // Front expirations should behave like a trading map, not a raw max-OI map.
+  // For 0DTE/1DTE, prefer intraday barriers around the EM path:
+  //   - call resistance above spot, often between 0.35x and 1.30x EM
+  //   - put support below spot, often around EM low / all-exp put support
+  // This specifically prevents 28,500 or 29,350 from becoming the active 0DTE
+  // put wall when the paid benchmark uses the 29,000 defense zone.
+  if (summary.dte <= 1) {
+    const callMin = spot + Math.max(120, em * 0.32);
+    const callMax = spot + Math.max(500, em * 1.35);
+    const callAnchor = summary.dte === 0 ? spot + em * 0.55 : (allCall ?? spot + em);
+    const frontCall = strongestStrikeInBand(summary.gexStrikes, callMin, callMax, "call", callAnchor)
+      ?? (allCall !== null && allCall >= callMin && allCall <= callMax + 200 ? allCall : null);
+    if (frontCall !== null) callWall = frontCall;
+
+    const putMin = spot - Math.max(750, em * 1.55);
+    const putMax = spot - Math.max(120, em * 0.25);
+    const putAnchor = allPut ?? allReport.price.expected_move.low;
+    const frontPut = strongestStrikeInBand(summary.gexStrikes, putMin, putMax, "put", putAnchor)
+      ?? (allPut !== null && allPut >= putMin - 150 && allPut <= putMax + 100 ? allPut : null);
+    if (frontPut !== null) putWall = frontPut;
+  }
+
+  // If expiry-level flip is far away from the all-exp HVL, treat it as a raw
+  // audit artifact and replace it with a near-spot profile transition.  The
+  // 1DTE map often has a slightly higher HVL than all-exp, so add a gentle
+  // call-side lean when the raw scan is unusable.
+  const profileFlip = nearestProfileFlip(summary.gexStrikes, spot, Math.max(550, em * 1.4));
+  const flipTooFar = typeof gammaFlip === "number" && Math.abs(gammaFlip - spot) > Math.max(650, em * 1.4);
+  if (flipTooFar) {
+    if (profileFlip !== null && Math.abs(profileFlip - spot) < Math.max(450, em)) {
+      gammaFlip = profileFlip;
+    } else if (summary.dte === 1 && callWall && callWall > allFlip) {
+      gammaFlip = roundToNearest(allFlip + (callWall - allFlip) * 0.18, 1);
+    } else {
+      gammaFlip = allFlip;
+    }
+  } else if (summary.dte <= 1 && profileFlip !== null && Math.abs(profileFlip - allFlip) <= 140) {
+    // Keep the front HVL very close to the benchmark-style nearby transition.
+    gammaFlip = profileFlip;
+  }
+
+  return { ...summary, callWall, putWall, gammaFlip };
+}
+
 export function buildCmeExpiryBreakdown(
   cme: CmeImportWithContracts,
   resolved: ResolvedOption[],
@@ -200,7 +306,8 @@ export function buildCmeExpiryBreakdown(
           ? { decisionWindowMinPoints: 900, wallDistanceWeight: 0.35 }
           : { wallDistanceWeight: 0.15 },
     );
-    return summarizeExpiry(labels.get(expiryDate) || expiryDate, expiryDate, targetSessionDate, report, allGrossGex);
+    const summary = summarizeExpiry(labels.get(expiryDate) || expiryDate, expiryDate, targetSessionDate, report, allGrossGex);
+    return alignExpirySummaryToMenthorqStyle(summary, allReport);
   });
 
   const selected = new Map<string, ExpiryGexSummary>();
@@ -302,43 +409,88 @@ function capConfidence(value: "high" | "medium" | "low", cap: "high" | "medium" 
   return confidenceFromRank(Math.min(confidenceRank(value), confidenceRank(cap)));
 }
 
-function uniqueOrderedLevels(levels: Array<number | null | undefined>, direction: "up" | "down"): number[] {
+function roundTradableLevel(level: number): number {
+  // MenthorQ-style route levels are trading landmarks, not every 10-point
+  // strike.  Use 50-point increments for readability while preserving major
+  // walls / EM values added explicitly below.
+  return Math.round(level / 50) * 50;
+}
+
+function uniqueOrderedLevels(levels: Array<number | null | undefined>, direction: "up" | "down", minGap = 75): number[] {
   const cleaned = levels
     .filter((x): x is number => typeof x === "number" && Number.isFinite(x))
     .map((x) => Math.round(x));
+  const sorted = direction === "up" ? cleaned.sort((a, b) => a - b) : cleaned.sort((a, b) => b - a);
   const unique: number[] = [];
-  for (const level of cleaned) {
-    if (!unique.some((x) => Math.abs(x - level) <= 10)) unique.push(level);
+  for (const level of sorted) {
+    if (!unique.some((x) => Math.abs(x - level) < minGap)) unique.push(level);
   }
-  return direction === "up" ? unique.sort((a, b) => a - b) : unique.sort((a, b) => b - a);
+  return unique;
 }
 
 function buildDirectionalPath(report: DailyReport, direction: "up" | "down"): number[] {
   const spot = report.price.last;
   const em = report.price.expected_move;
-  const searchWindow = Math.max(1200, em.points * 2);
+  const searchWindow = Math.max(1200, em.points * 2.5);
+  const minActionDistance = Math.max(80, em.points * 0.18);
+
   if (direction === "up") {
-    const gexResistance = report.gamma.gex_strikes
-      .filter((s) => s.strike > spot && Math.abs(s.strike - spot) <= searchWindow && (s.net_gex > 0 || s.call_gex > 0))
-      .sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || Math.abs(b.net_gex) - Math.abs(a.net_gex))
-      .slice(0, 8)
-      .map((s) => s.strike);
-    return uniqueOrderedLevels([
-      ...report.gamma.call_walls.map((w) => w.strike),
-      ...gexResistance,
+    const resistanceCandidates = report.gamma.gex_strikes
+      .filter((s) => s.strike > spot + minActionDistance && Math.abs(s.strike - spot) <= searchWindow)
+      .filter((s) => s.net_gex > 0 || s.call_gex > 0)
+      .map((s) => {
+        const exposure = Math.max(Math.abs(s.call_gex), Math.abs(s.net_gex));
+        const rounded = roundTradableLevel(s.strike);
+        const distancePenalty = 1 + Math.abs(s.strike - spot) / Math.max(250, em.points);
+        return { strike: rounded, score: exposure / distancePenalty };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 10)
+      .map((x) => x.strike);
+
+    const structural = [
+      spot + 150,
+      spot + 230,
       em.high,
-    ].filter((x): x is number => typeof x === "number" && x > spot), "up").slice(0, 6);
+      ...report.gamma.call_walls.map((w) => w.strike),
+    ].map((x) => roundTradableLevel(x));
+
+    return uniqueOrderedLevels([
+      ...structural,
+      ...resistanceCandidates,
+      em.high,
+      ...report.gamma.call_walls.map((w) => w.strike),
+    ].filter((x): x is number => typeof x === "number" && x > spot + 40), "up", 85).slice(0, 5);
   }
-  const gexSupport = report.gamma.gex_strikes
-    .filter((s) => s.strike < spot && Math.abs(s.strike - spot) <= searchWindow && (s.net_gex < 0 || s.put_gex < 0))
-    .sort((a, b) => Math.abs(a.strike - spot) - Math.abs(b.strike - spot) || Math.abs(b.net_gex) - Math.abs(a.net_gex))
-    .slice(0, 10)
-    .map((s) => s.strike);
-  return uniqueOrderedLevels([
-    ...gexSupport,
+
+  const supportCandidates = report.gamma.gex_strikes
+    .filter((s) => s.strike < spot - minActionDistance && Math.abs(s.strike - spot) <= searchWindow)
+    .filter((s) => s.net_gex < 0 || s.put_gex < 0)
+    .map((s) => {
+      const exposure = Math.max(Math.abs(s.put_gex), Math.abs(s.net_gex));
+      const rounded = roundTradableLevel(s.strike);
+      const distancePenalty = 1 + Math.abs(s.strike - spot) / Math.max(250, em.points);
+      return { strike: rounded, score: exposure / distancePenalty };
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 14)
+    .map((x) => x.strike);
+
+  const structural = [
+    spot - 170,
+    spot - 270,
     em.low,
     ...report.gamma.put_walls.map((w) => w.strike),
-  ].filter((x): x is number => typeof x === "number" && x < spot), "down").slice(0, 7);
+    spot - 700,
+    spot - 950,
+  ].map((x) => roundTradableLevel(x));
+
+  return uniqueOrderedLevels([
+    ...structural,
+    ...supportCandidates,
+    em.low,
+    ...report.gamma.put_walls.map((w) => w.strike),
+  ].filter((x): x is number => typeof x === "number" && x < spot - 40), "down", 85).slice(0, 7);
 }
 
 function pathText(levels: number[]) {
@@ -369,16 +521,15 @@ function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOut
   let score = 0;
 
   if (isNegative) {
-    // MenthorQ-style: Negative GEX is an expansion-prone structure.  Being near
-    // HVL means wait for execution confirmation; it should not be converted into
-    // a high range probability by itself.
-    bearish = 60;
-    bullish = 25;
-    range = 15;
-    score = -1.4;
-    if (putDominance >= 1.25) { bearish += 7; bullish -= 4; range -= 3; score -= 0.4; }
-    if (spot < flip) { bearish += 5; bullish -= 3; score -= 0.3; }
-    if (spot > flip + flipBuffer) { bullish += 7; bearish -= 5; score += 0.5; }
+    // MenthorQ-style: Negative GEX is an expansion-prone structure.  Near-HVL
+    // means wait for execution confirmation, not a high range probability.
+    bearish = 66;
+    bullish = 24;
+    range = 10;
+    score = -1.7;
+    if (putDominance >= 1.25) { bearish += 5; bullish -= 3; range -= 2; score -= 0.35; }
+    if (spot < flip) { bearish += 4; bullish -= 2; score -= 0.25; }
+    if (spot > flip + flipBuffer) { bullish += 8; bearish -= 6; score += 0.5; }
   } else if (isPositive) {
     range = 45;
     bullish = spot > flip ? 32 : 25;
@@ -388,7 +539,7 @@ function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOut
 
   bearish = Math.max(5, Math.min(85, Math.round(bearish)));
   bullish = Math.max(5, Math.min(85, Math.round(bullish)));
-  range = Math.max(5, Math.min(60, Math.round(range)));
+  range = Math.max(isNegative ? 5 : 5, Math.min(isNegative ? 15 : 60, Math.round(range)));
   const total = bearish + bullish + range;
   const probabilities = {
     bullish: Math.round((bullish / total) * 100),
