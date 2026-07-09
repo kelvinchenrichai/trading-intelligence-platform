@@ -101,14 +101,18 @@ export class RealMarketDatabase {
   }
 
   public getStatus(): ApplicationStatus {
-    const database = this.config.store
-      ? this.config.store.lastError || this.initializationWarning
-        ? "error"
-        : "connected"
-      : "not_configured";
-    const persisted = database === "connected";
+    // Treat Supabase configuration separately from optional snapshot-refresh health.
+    // CME PG40 imports live in their own tables and can be fully usable even when
+    // refresh_runs / proxy snapshots / TradingView tables are missing or stale.
+    // Previously any Supabase REST error poisoned `store.lastError`, made the app
+    // show "memory_only", and blocked the dashboard from reading the latest CME
+    // import. That is why a valid 2026-07-08 v0.3 CME import could exist while the
+    // dashboard still rendered the old 2026-07-07 v0.1 row.
+    const database: ApplicationStatus["database"] = this.config.store ? "connected" : "not_configured";
+    const persisted = Boolean(this.config.store);
     const warnings = [
-      ...(this.initializationWarning ? [this.initializationWarning] : []),
+      ...(this.initializationWarning ? [`Supabase snapshot initialization warning: ${this.initializationWarning}`] : []),
+      ...(this.config.store?.lastError ? [`Supabase optional-store warning: ${this.config.store.lastError}`] : []),
       ...(this.lastRefresh?.warnings || []),
     ];
     const successfulSources = this.lastRefresh?.sourceStatus.filter((s) => s.state === "ok").length || 0;
@@ -138,18 +142,26 @@ export class RealMarketDatabase {
       if (cmeReport) return cmeReport;
     }
 
-    if (this.config.store && !this.config.store.lastError) {
-      const stored = await this.config.store.getReport(normalizedInstrument, date);
-      if (stored) return stored;
+    if (this.config.store) {
+      try {
+        const stored = await this.config.store.getReport(normalizedInstrument, date);
+        if (stored) return stored;
+      } catch (error: any) {
+        console.warn(`[dashboard] Stored proxy report unavailable; falling back to in-memory snapshot: ${error?.message || error}`);
+      }
     }
     const targetDate = date || Object.keys(this.dailyReports).sort().at(-1);
     return targetDate ? this.dailyReports[targetDate]?.find((report) => report.instrument === normalizedInstrument) || null : null;
   }
 
   public async getHistory(instrument: string) {
-    if (this.config.store && !this.config.store.lastError) {
-      const history = await this.config.store.getHistory(instrument);
-      if (history.length) return history.map(({ date, report }) => this.toHistoryRow(date, report));
+    if (this.config.store) {
+      try {
+        const history = await this.config.store.getHistory(instrument);
+        if (history.length) return history.map(({ date, report }) => this.toHistoryRow(date, report));
+      } catch (error: any) {
+        console.warn(`[dashboard] Stored history unavailable; falling back to in-memory history: ${error?.message || error}`);
+      }
     }
     return Object.keys(this.dailyReports)
       .sort()
@@ -162,9 +174,13 @@ export class RealMarketDatabase {
   }
 
   public async getReconciliation(proxy: string, date: string): Promise<DataReconciliation[]> {
-    if (this.config.store && !this.config.store.lastError) {
-      const stored = await this.config.store.getReconciliation(proxy, date);
-      if (stored.length) return stored;
+    if (this.config.store) {
+      try {
+        const stored = await this.config.store.getReconciliation(proxy, date);
+        if (stored.length) return stored;
+      } catch (error: any) {
+        console.warn(`[dashboard] Stored reconciliation unavailable; falling back to in-memory records: ${error?.message || error}`);
+      }
     }
     return this.dataReconciliation.filter((record) => record.proxy === proxy && record.snapshot_date === date);
   }
@@ -185,7 +201,10 @@ export class RealMarketDatabase {
 
 
   private async getCmeOfficialReport(date?: string): Promise<DailyReport | null> {
-    if (!this.config.store || this.config.store.lastError) return null;
+    // Do not gate CME reads on store.lastError. A non-critical error from
+    // refresh_runs, daily_reports, or tradingview_events should not prevent the
+    // authoritative CME PG40 tables from being used.
+    if (!this.config.store) return null;
     try {
       const cmeData = date
         ? await this.config.store.getCmeContractsByTradeDate(date)
@@ -413,7 +432,7 @@ export class RealMarketDatabase {
 
         // === CME 精算優先 (僅 NQ,且 tradeDate 嚴格等於 Dashboard date) ===
         // CME PG40 是 Layer 1 Official EOD Baseline，不是 live flow；NDX 只保留為 confluence。
-        if (instrument.futuresCode.toUpperCase() === "NQ" && this.config.store && !this.config.store.lastError) {
+        if (instrument.futuresCode.toUpperCase() === "NQ" && this.config.store) {
           try {
             const cmeData = await this.config.store.getCmeContractsByTradeDate(result.snapshotDate);
             if (cmeData && cmeData.contracts.length > 0 && cmeData.futuresSettlement > 0) {
