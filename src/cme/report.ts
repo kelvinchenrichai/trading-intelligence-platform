@@ -166,6 +166,63 @@ function roundToNearest(value: number, step = 5): number {
   return Math.round(value / step) * step;
 }
 
+/**
+ * Phase 9.5: choose a front-expiry (0DTE/1DTE) wall that respects structural
+ * resonance, not just raw GEX magnitude. Given the raw strongest-in-band pick,
+ * upgrade it to a nearby structurally-dominant strike when that strike:
+ *   - matches the all-expiry wall (multi-expiry resonance), and/or
+ *   - is a round-number level (integer strike like 30,000 / 29,500), and/or
+ *   - is the first significant barrier between spot and the raw pick.
+ * The upgrade only fires when the resonant strike carries at least ~55% of the
+ * raw pick's exposure, so we never replace a genuinely dominant level with a
+ * weak round number.
+ */
+function preferResonantWall(
+  strikes: DailyReport["gamma"]["gex_strikes"],
+  rawPick: number | null,
+  allExpWall: number | null,
+  spot: number,
+  bandMin: number,
+  bandMax: number,
+  side: "call" | "put",
+): number | null {
+  if (rawPick === null) return allExpWall;
+  const exposureAt = (strike: number): number => {
+    const s = strikes.find((x) => x.strike === strike);
+    if (!s) return 0;
+    return side === "call" ? Math.max(Math.abs(s.call_gex), Math.abs(s.net_gex)) : Math.max(Math.abs(s.put_gex), Math.abs(s.net_gex));
+  };
+  const isRound = (v: number) => v % 500 === 0 || v % 1000 === 0;
+  const rawExp = exposureAt(rawPick);
+  if (rawExp <= 0) return rawPick;
+
+  // Candidate resonant levels: all-exp wall + any round strike strictly between
+  // spot and the raw pick (inclusive of the all-exp wall).
+  const between = strikes
+    .map((s) => s.strike)
+    .filter((k) => (side === "call" ? k >= spot && k <= rawPick : k <= spot && k >= rawPick))
+    .filter((k) => k >= bandMin && k <= bandMax);
+  const candidates = new Set<number>();
+  if (allExpWall !== null && allExpWall >= bandMin && allExpWall <= bandMax) candidates.add(allExpWall);
+  for (const k of between) if (isRound(k)) candidates.add(k);
+
+  let best = rawPick;
+  let bestScore = rawExp; // raw pick baseline
+  for (const c of candidates) {
+    if (c === rawPick) continue;
+    const exp = exposureAt(c);
+    let score = exp;
+    if (allExpWall !== null && c === allExpWall) score *= 1.6; // resonance bonus
+    if (isRound(c)) score *= 1.25; // round-number bonus
+    // Only allow upgrade if the resonant strike still carries real exposure.
+    if (exp >= rawExp * 0.55 && score > bestScore) {
+      best = c;
+      bestScore = score;
+    }
+  }
+  return best;
+}
+
 function nearestProfileFlip(strikes: DailyReport["gamma"]["gex_strikes"], spot: number, windowPoints: number): number | null {
   const near = [...strikes]
     .filter((s) => Math.abs(s.strike - spot) <= windowPoints)
@@ -234,15 +291,25 @@ function alignExpirySummaryToMenthorqStyle(
     const callMin = spot + Math.max(120, em * 0.32);
     const callMax = spot + Math.max(500, em * 1.35);
     const callAnchor = summary.dte === 0 ? spot + em * 0.55 : (allCall ?? spot + em);
-    const frontCall = strongestStrikeInBand(summary.gexStrikes, callMin, callMax, "call", callAnchor)
+    const rawFrontCall = strongestStrikeInBand(summary.gexStrikes, callMin, callMax, "call", callAnchor)
       ?? (allCall !== null && allCall >= callMin && allCall <= callMax + 200 ? allCall : null);
+    // Phase 9.5: a 0DTE call wall is a trading barrier, not a raw max-GEX pick.
+    // Apply resonance + round-number bonuses so a slightly-larger far strike
+    // (e.g. 30,400) cannot outrank a structurally dominant nearer level
+    // (e.g. 30,000 = all-exp call wall + integer + first resistance above spot).
+    const frontCall = preferResonantWall(
+      summary.gexStrikes, rawFrontCall, allCall, spot, callMin, callMax, "call",
+    );
     if (frontCall !== null) callWall = frontCall;
 
     const putMin = spot - Math.max(750, em * 1.55);
     const putMax = spot - Math.max(120, em * 0.25);
     const putAnchor = allPut ?? allReport.price.expected_move.low;
-    const frontPut = strongestStrikeInBand(summary.gexStrikes, putMin, putMax, "put", putAnchor)
+    const rawFrontPut = strongestStrikeInBand(summary.gexStrikes, putMin, putMax, "put", putAnchor)
       ?? (allPut !== null && allPut >= putMin - 150 && allPut <= putMax + 100 ? allPut : null);
+    const frontPut = preferResonantWall(
+      summary.gexStrikes, rawFrontPut, allPut, spot, putMin, putMax, "put",
+    );
     if (frontPut !== null) putWall = frontPut;
   }
 
@@ -536,10 +603,27 @@ function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOut
     if (spot < flip) { bearish += 4; bullish -= 2; score -= 0.25; }
     if (spot > flip + flipBuffer) { bullish += 8; bearish -= 6; score += 0.5; }
   } else if (isPositive) {
-    range = 45;
-    bullish = spot > flip ? 32 : 25;
-    bearish = 100 - range - bullish;
-    score = spot > flip ? 0.6 : -0.2;
+    // Phase 9.5: positive gamma is range-prone by default, but the location of
+    // price relative to HVL and the call/put wall asymmetry still tilt the tone.
+    // Price ABOVE HVL heading into a stacked call wall = mild bullish test bias,
+    // not flat "range 45%". This matches the vendor's "medium-confidence bull".
+    const aboveHvl = spot > flip;
+    const callMass = report.gamma.call_walls.reduce((a, w) => a + Math.abs(w.gex ?? 0), 0);
+    const putMass = report.gamma.put_walls.reduce((a, w) => a + Math.abs(w.gex ?? 0), 0);
+    const callHeavy = callMass > putMass * 1.3; // upside walls dominate
+    if (aboveHvl) {
+      bullish = 42;
+      range = 38;
+      bearish = 20;
+      score = 0.7;
+      // A heavy call wall overhead caps upside conviction slightly (resistance).
+      if (callHeavy) { bullish -= 4; range += 4; score -= 0.2; }
+    } else {
+      bullish = 24;
+      range = 40;
+      bearish = 36;
+      score = -0.3;
+    }
   }
 
   bearish = Math.max(5, Math.min(85, Math.round(bearish)));
@@ -565,7 +649,7 @@ function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOut
     label = "盤整區間 / 邊界交易";
   } else if (probabilities.bullish > probabilities.bearish + 10) {
     direction = "bullish";
-    label = "條件性偏多";
+    label = isPositive ? "正 Gamma 偏多測試" : "條件性偏多";
   }
 
   const confidence = capConfidence(report.regime.conviction ?? report.data_confidence, nearFlip ? "low" : report.data_confidence);

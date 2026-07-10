@@ -335,20 +335,23 @@ export function analyzeMarketStructure(
     flipLevel = lastPrice;
   }
 
-  // MenthorQ-style HVL refinement:
-  // The scan above recomputes total GEX across hypothetical spots, which is the
-  // correct zero-gamma estimate.  However, desk HVL often behaves more like the
-  // near-spot profile transition where strike-level net GEX flips from negative
-  // to positive.  When that profile transition is very close to spot, prefer it
-  // as the display HVL. This reduces the common 50-100 point drift between
-  // theoretical zero gamma and the vendor-style HVL line while preserving the
-  // raw profile in audit.
+  // MenthorQ-style HVL refinement (Phase 9.5 — structural, not spot-magnet):
+  // The scan above recomputes total GEX across hypothetical spots (correct
+  // zero-gamma estimate). Desk HVL behaves like the strongest GEX-profile
+  // regime-transition, which is NOT necessarily the sign-cross nearest to spot.
+  // The previous implementation sorted candidates by |candidate - spot| and took
+  // the closest, which pulled HVL onto price (e.g. 29,959.6 next to spot 29,937)
+  // and buried the real transition (29,720 at the top of the negative-gamma band,
+  // adjacent to the 30,000 call wall). We now score each sign-cross by structural
+  // strength and use spot-distance only as a final tie-breaker.
   const profileFlipWindow = Math.max(650, expectedMovePoints * 1.25);
-  const profileFlipCandidates: number[] = [];
   const profileStrikes = [...gexStrikes]
     .filter((s) => Math.abs(s.strike - lastPrice) <= profileFlipWindow && Math.abs(s.net_gex) > 0)
     .sort((a, b) => a.strike - b.strike);
 
+  type FlipCand = { price: number; strength: number; slope: number };
+  const flipCands: FlipCand[] = [];
+  const maxAbsGex = Math.max(1, ...profileStrikes.map((s) => Math.abs(s.net_gex)));
   for (let i = 0; i < profileStrikes.length - 1; i++) {
     const a = profileStrikes[i];
     const b = profileStrikes[i + 1];
@@ -357,19 +360,35 @@ export function analyzeMarketStructure(
     if (!crosses || denom === 0) continue;
     const t = -a.net_gex / denom;
     const candidate = a.strike + t * (b.strike - a.strike);
-    if (Number.isFinite(candidate)) profileFlipCandidates.push(candidate);
+    if (!Number.isFinite(candidate)) continue;
+    // Structural strength of this transition:
+    //  - slope magnitude |ΔGEX| across the cross (steeper = truer regime change)
+    //  - local wall mass = |GEX| on both sides of the cross, normalised
+    const slope = Math.abs(denom);
+    const localMass = (Math.abs(a.net_gex) + Math.abs(b.net_gex)) / (2 * maxAbsGex); // 0..1
+    const strength = slope * (0.5 + localMass); // weight mass but keep slope dominant
+    flipCands.push({ price: candidate, strength, slope });
   }
 
-  if (profileFlipCandidates.length) {
-    profileFlipCandidates.sort((a, b) => Math.abs(a - lastPrice) - Math.abs(b - lastPrice));
-    const profileFlip = profileFlipCandidates[0];
+  if (flipCands.length) {
+    // Primary sort: structural strength desc. Tie-breaker: closer to spot.
+    flipCands.sort((x, y) => (y.strength - x.strength) || (Math.abs(x.price - lastPrice) - Math.abs(y.price - lastPrice)));
+    const best = flipCands[0];
     const scanDistance = Math.abs(flipLevel - lastPrice);
-    const profileDistance = Math.abs(profileFlip - lastPrice);
-    // Prefer the profile HVL when it sits near spot and is materially closer
-    // than the theoretical scan flip.  This is deliberately conservative so far
-    // tail sign changes cannot override a clean zero-gamma scan.
-    if (profileDistance <= Math.max(120, expectedMovePoints * 0.35) && profileDistance + 15 < scanDistance) {
-      flipLevel = profileFlip;
+    const bestDistance = Math.abs(best.price - lastPrice);
+    // Adopt the structural HVL when it is a meaningfully strong transition. Unlike
+    // before, we do NOT require it to be near spot — a strong transition 200+ pts
+    // away is exactly the vendor-style HVL we want. We still guard against picking
+    // a far tail cross that is weaker than the clean scan flip: require the best
+    // structural candidate to be clearly the dominant one.
+    const secondStrength = flipCands[1]?.strength ?? 0;
+    const dominant = best.strength >= secondStrength * 1.15 || flipCands.length === 1;
+    const withinWindow = bestDistance <= profileFlipWindow;
+    if (dominant && withinWindow) {
+      flipLevel = best.price;
+    } else if (bestDistance + 15 < scanDistance) {
+      // fallback to old conservative behaviour if no dominant structural pick
+      flipLevel = best.price;
     }
   }
 
@@ -511,6 +530,11 @@ export function analyzeMarketStructure(
   }
   if (distToFlipPct > 0.01) {
     signals.push({ text: `遠離 Gamma Flip (${Math.round(Math.abs(lastPrice - flipLevel))} 點)`, weight: 1 });
+  } else if (distToFlipPct > 0.005 && status === "positive" && lastPrice > flipLevel) {
+    // Phase 9.5: in a positive-gamma regime, price sitting clearly ABOVE a
+    // below-spot HVL is a mild directional (bullish) structure, not a "no edge"
+    // pin. Only genuinely straddling the flip (<0.5%) should be penalised.
+    signals.push({ text: `位於 HVL 上方 (${Math.round(lastPrice - flipLevel)} 點, 正 Gamma 偏多結構)`, weight: 1 });
   } else {
     signals.push({ text: "貼近 Gamma Flip 零軸 (方向不明)", weight: -1 });
   }
