@@ -335,61 +335,61 @@ export function analyzeMarketStructure(
     flipLevel = lastPrice;
   }
 
-  // MenthorQ-style HVL refinement (Phase 9.5 — structural, not spot-magnet):
-  // The scan above recomputes total GEX across hypothetical spots (correct
-  // zero-gamma estimate). Desk HVL behaves like the strongest GEX-profile
-  // regime-transition, which is NOT necessarily the sign-cross nearest to spot.
-  // The previous implementation sorted candidates by |candidate - spot| and took
-  // the closest, which pulled HVL onto price (e.g. 29,959.6 next to spot 29,937)
-  // and buried the real transition (29,720 at the top of the negative-gamma band,
-  // adjacent to the 30,000 call wall). We now score each sign-cross by structural
-  // strength and use spot-distance only as a final tie-breaker.
-  const profileFlipWindow = Math.max(650, expectedMovePoints * 1.25);
+  // MenthorQ-style HVL refinement (Phase 9.6 — local regime boundary, wall-aware):
+  //
+  // Definitions in play:
+  //  • Cumulative-zero flip  = price where net GEX summed from the window bottom
+  //    crosses zero. This is pulled UP toward spot by the huge positive walls
+  //    above 30,000 (their mass dominates the running sum), giving ≈29,860.
+  //  • Local regime boundary = the sign flip that separates the contiguous
+  //    negative-gamma band (below) from the contiguous positive-gamma band
+  //    (above). This is where desks draw HVL — for 07-09 the −6,601 @29,720 →
+  //    +263,092 @29,850 flip, i.e. ≈29,720.
+  //
+  // MenthorQ's HVL tracks the LOCAL boundary, not the cumulative zero. We find
+  // the highest strike that is still net-negative before the profile turns and
+  // STAYS net-positive into the call-wall region, then interpolate that flip.
+  // The cumulative value is retained only as a sanity bound.
+  const profileFlipWindow = Math.max(700, expectedMovePoints * 1.6);
   const profileStrikes = [...gexStrikes]
-    .filter((s) => Math.abs(s.strike - lastPrice) <= profileFlipWindow && Math.abs(s.net_gex) > 0)
+    .filter((s) => Math.abs(s.strike - lastPrice) <= profileFlipWindow)
     .sort((a, b) => a.strike - b.strike);
 
-  type FlipCand = { price: number; strength: number; slope: number };
-  const flipCands: FlipCand[] = [];
-  const maxAbsGex = Math.max(1, ...profileStrikes.map((s) => Math.abs(s.net_gex)));
-  for (let i = 0; i < profileStrikes.length - 1; i++) {
-    const a = profileStrikes[i];
-    const b = profileStrikes[i + 1];
-    const denom = b.net_gex - a.net_gex;
-    const crosses = a.net_gex * b.net_gex < 0;
-    if (!crosses || denom === 0) continue;
-    const t = -a.net_gex / denom;
-    const candidate = a.strike + t * (b.strike - a.strike);
-    if (!Number.isFinite(candidate)) continue;
-    // Structural strength of this transition:
-    //  - slope magnitude |ΔGEX| across the cross (steeper = truer regime change)
-    //  - local wall mass = |GEX| on both sides of the cross, normalised
-    const slope = Math.abs(denom);
-    const localMass = (Math.abs(a.net_gex) + Math.abs(b.net_gex)) / (2 * maxAbsGex); // 0..1
-    const strength = slope * (0.5 + localMass); // weight mass but keep slope dominant
-    flipCands.push({ price: candidate, strength, slope });
+  let boundaryFlip: number | null = null;
+  if (profileStrikes.length >= 2) {
+    // Walk upward; find the last negative→positive transition where the positive
+    // side is "durable" (leads into positive wall mass rather than a lone blip).
+    // Durability check: within the next few strikes above the flip, cumulative
+    // local GEX stays positive. This ignores tiny mixed-sign noise near spot.
+    const LOOKAHEAD = 3;
+    const candidates: Array<{ price: number; posMass: number }> = [];
+    for (let i = 0; i < profileStrikes.length - 1; i++) {
+      const a = profileStrikes[i];
+      const b = profileStrikes[i + 1];
+      if (!(a.net_gex < 0 && b.net_gex > 0)) continue;
+      // durability: sum of net GEX over the next LOOKAHEAD strikes must stay > 0
+      let ahead = 0;
+      for (let k = i + 1; k < Math.min(profileStrikes.length, i + 1 + LOOKAHEAD); k++) ahead += profileStrikes[k].net_gex;
+      if (ahead <= 0) continue;
+      const denom = b.net_gex - a.net_gex;
+      const price = denom !== 0 ? a.strike + (-a.net_gex / denom) * (b.strike - a.strike) : a.strike;
+      candidates.push({ price, posMass: ahead });
+    }
+    if (candidates.length) {
+      // The regime boundary is the LOWEST durable negative→positive flip: the
+      // bottom of the positive-gamma zone. Selecting by max posMass would always
+      // snap to the flip adjacent to the 30,000 mega-wall (its lookahead borrows
+      // the wall's mass), pulling HVL up toward spot. Instead we require a mass
+      // floor (filter out tiny near-spot wiggles) then take the lowest strike.
+      const massFloor = Math.max(...candidates.map((c) => c.posMass)) * 0.25;
+      const durable = candidates.filter((c) => c.posMass >= massFloor);
+      durable.sort((x, y) => x.price - y.price);
+      boundaryFlip = durable[0]?.price ?? candidates.sort((x, y) => y.posMass - x.posMass)[0].price;
+    }
   }
 
-  if (flipCands.length) {
-    // Primary sort: structural strength desc. Tie-breaker: closer to spot.
-    flipCands.sort((x, y) => (y.strength - x.strength) || (Math.abs(x.price - lastPrice) - Math.abs(y.price - lastPrice)));
-    const best = flipCands[0];
-    const scanDistance = Math.abs(flipLevel - lastPrice);
-    const bestDistance = Math.abs(best.price - lastPrice);
-    // Adopt the structural HVL when it is a meaningfully strong transition. Unlike
-    // before, we do NOT require it to be near spot — a strong transition 200+ pts
-    // away is exactly the vendor-style HVL we want. We still guard against picking
-    // a far tail cross that is weaker than the clean scan flip: require the best
-    // structural candidate to be clearly the dominant one.
-    const secondStrength = flipCands[1]?.strength ?? 0;
-    const dominant = best.strength >= secondStrength * 1.15 || flipCands.length === 1;
-    const withinWindow = bestDistance <= profileFlipWindow;
-    if (dominant && withinWindow) {
-      flipLevel = best.price;
-    } else if (bestDistance + 15 < scanDistance) {
-      // fallback to old conservative behaviour if no dominant structural pick
-      flipLevel = best.price;
-    }
+  if (boundaryFlip !== null && Math.abs(boundaryFlip - lastPrice) <= profileFlipWindow) {
+    flipLevel = boundaryFlip;
   }
 
   flipLevel = Math.round(flipLevel * 10) / 10;

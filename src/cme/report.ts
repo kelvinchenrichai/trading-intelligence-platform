@@ -212,10 +212,14 @@ function preferResonantWall(
     if (c === rawPick) continue;
     const exp = exposureAt(c);
     let score = exp;
-    if (allExpWall !== null && c === allExpWall) score *= 1.6; // resonance bonus
+    const isResonant = allExpWall !== null && c === allExpWall;
+    if (isResonant) score *= 1.6; // resonance bonus
     if (isRound(c)) score *= 1.25; // round-number bonus
-    // Only allow upgrade if the resonant strike still carries real exposure.
-    if (exp >= rawExp * 0.55 && score > bestScore) {
+    // Exposure floor: a resonant all-exp wall only needs to carry real (not
+    // trivial) exposure — 30% — because multi-expiry agreement is itself strong
+    // evidence. A non-resonant round number still needs 55% to upgrade.
+    const floor = isResonant ? 0.30 : 0.55;
+    if (exp >= rawExp * floor && score > bestScore) {
       best = c;
       bestScore = score;
     }
@@ -313,26 +317,64 @@ function alignExpirySummaryToMenthorqStyle(
     if (frontPut !== null) putWall = frontPut;
   }
 
-  // If expiry-level flip is far away from the all-exp HVL, treat it as a raw
-  // audit artifact and replace it with a near-spot profile transition.  The
-  // 1DTE map often has a slightly higher HVL than all-exp, so add a gentle
-  // call-side lean when the raw scan is unusable.
-  const profileFlip = nearestProfileFlip(summary.gexStrikes, spot, Math.max(550, em * 1.4));
-  const flipTooFar = typeof gammaFlip === "number" && Math.abs(gammaFlip - spot) > Math.max(650, em * 1.4);
-  if (flipTooFar) {
-    if (profileFlip !== null && Math.abs(profileFlip - spot) < Math.max(450, em)) {
-      gammaFlip = profileFlip;
-    } else if (summary.dte === 1 && callWall && callWall > allFlip) {
-      gammaFlip = roundToNearest(allFlip + (callWall - allFlip) * 0.18, 1);
-    } else {
-      gammaFlip = allFlip;
-    }
-  } else if (summary.dte <= 1 && profileFlip !== null && Math.abs(profileFlip - allFlip) <= 140) {
-    // Keep the front HVL very close to the benchmark-style nearby transition.
-    gammaFlip = profileFlip;
+  // Phase 9.6: front-expiry (0DTE/1DTE) HVL must be a real regime boundary
+  // BELOW the call wall, never a far-tail cross above it. The old logic could
+  // return e.g. 30,320 (above the 30,000 call wall) which is meaningless as a
+  // 0DTE HVL. We now:
+  //   1. compute a boundary flip = lowest durable negative→positive transition
+  //      in the front window (same method as all-exp),
+  //   2. hard-guard: HVL may not sit at/above the call wall — if it does, or if
+  //      no boundary is found, fall back to the all-exp flip.
+  const frontBoundary = frontRegimeBoundary(summary.gexStrikes, spot, Math.max(700, em * 1.6));
+  const callWallForGuard = callWall ?? (allCall ?? spot + em);
+  let resolvedFlip: number | null = null;
+  if (frontBoundary !== null && frontBoundary < callWallForGuard - 20) {
+    resolvedFlip = frontBoundary;
+  } else if (typeof gammaFlip === "number" && gammaFlip < callWallForGuard - 20 && Math.abs(gammaFlip - spot) <= Math.max(650, em * 1.4)) {
+    resolvedFlip = gammaFlip;
+  } else {
+    // Last resort: benchmark-style nearby transition, else all-exp flip — but
+    // always clamped below the call wall.
+    const profileFlip = nearestProfileFlip(summary.gexStrikes, spot, Math.max(550, em * 1.4));
+    if (profileFlip !== null && profileFlip < callWallForGuard - 20) resolvedFlip = profileFlip;
+    else resolvedFlip = Math.min(allFlip, callWallForGuard - 40);
   }
+  gammaFlip = Math.round(resolvedFlip * 10) / 10;
 
   return { ...summary, callWall, putWall, gammaFlip };
+}
+
+/**
+ * Phase 9.6: front-expiry regime boundary = lowest durable negative→positive
+ * net-GEX transition within the near-spot window. Mirrors the all-exp HVL logic
+ * so 0DTE / 1DTE HVL lines are consistent and never snap to a far tail cross.
+ */
+function frontRegimeBoundary(
+  strikes: DailyReport["gamma"]["gex_strikes"],
+  spot: number,
+  windowPoints: number,
+): number | null {
+  const ps = strikes
+    .filter((s) => Math.abs(s.strike - spot) <= windowPoints)
+    .sort((a, b) => a.strike - b.strike);
+  if (ps.length < 2) return null;
+  const LOOKAHEAD = 3;
+  const cands: Array<{ price: number; posMass: number }> = [];
+  for (let i = 0; i < ps.length - 1; i++) {
+    const a = ps[i];
+    const b = ps[i + 1];
+    if (!(a.net_gex < 0 && b.net_gex > 0)) continue;
+    let ahead = 0;
+    for (let k = i + 1; k < Math.min(ps.length, i + 1 + LOOKAHEAD); k++) ahead += ps[k].net_gex;
+    if (ahead <= 0) continue;
+    const denom = b.net_gex - a.net_gex;
+    const price = denom !== 0 ? a.strike + (-a.net_gex / denom) * (b.strike - a.strike) : a.strike;
+    cands.push({ price, posMass: ahead });
+  }
+  if (!cands.length) return null;
+  const massFloor = Math.max(...cands.map((c) => c.posMass)) * 0.25;
+  const durable = cands.filter((c) => c.posMass >= massFloor).sort((x, y) => x.price - y.price);
+  return durable[0]?.price ?? null;
 }
 
 export function buildCmeExpiryBreakdown(
