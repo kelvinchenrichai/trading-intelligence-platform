@@ -317,27 +317,22 @@ function alignExpirySummaryToMenthorqStyle(
     if (frontPut !== null) putWall = frontPut;
   }
 
-  // Phase 9.6: front-expiry (0DTE/1DTE) HVL must be a real regime boundary
-  // BELOW the call wall, never a far-tail cross above it. The old logic could
-  // return e.g. 30,320 (above the 30,000 call wall) which is meaningless as a
-  // 0DTE HVL. We now:
-  //   1. compute a boundary flip = lowest durable negative→positive transition
-  //      in the front window (same method as all-exp),
-  //   2. hard-guard: HVL may not sit at/above the call wall — if it does, or if
-  //      no boundary is found, fall back to the all-exp flip.
-  const frontBoundary = frontRegimeBoundary(summary.gexStrikes, spot, Math.max(700, em * 1.6));
+  // Phase 9.7: front-expiry HVL uses the SAME vendor semantics as all-exp —
+  // the last negative-GEX STRIKE before durable positive gamma (an actual
+  // strike, not an interpolation). Verified against MenthorQ 2026-07-09:
+  //   0DTE HVL = 29,590 with that strike's GEX = −4,603.
+  // Hard guard: a 0DTE HVL can never sit at/above the 0DTE call wall (the old
+  // code produced 30,320 > call wall 30,000, which is structurally impossible).
+  const frontHvl = frontRegimeBoundaryStrike(summary.gexStrikes, spot, Math.max(700, em * 1.6));
   const callWallForGuard = callWall ?? (allCall ?? spot + em);
-  let resolvedFlip: number | null = null;
-  if (frontBoundary !== null && frontBoundary < callWallForGuard - 20) {
-    resolvedFlip = frontBoundary;
-  } else if (typeof gammaFlip === "number" && gammaFlip < callWallForGuard - 20 && Math.abs(gammaFlip - spot) <= Math.max(650, em * 1.4)) {
+  let resolvedFlip: number;
+  if (frontHvl !== null && frontHvl < callWallForGuard) {
+    resolvedFlip = frontHvl;
+  } else if (typeof gammaFlip === "number" && gammaFlip < callWallForGuard && Math.abs(gammaFlip - spot) <= Math.max(700, em * 1.6)) {
     resolvedFlip = gammaFlip;
   } else {
-    // Last resort: benchmark-style nearby transition, else all-exp flip — but
-    // always clamped below the call wall.
-    const profileFlip = nearestProfileFlip(summary.gexStrikes, spot, Math.max(550, em * 1.4));
-    if (profileFlip !== null && profileFlip < callWallForGuard - 20) resolvedFlip = profileFlip;
-    else resolvedFlip = Math.min(allFlip, callWallForGuard - 40);
+    // Fall back to the all-exp HVL, still clamped strictly below the call wall.
+    resolvedFlip = Math.min(allFlip, callWallForGuard - 40);
   }
   gammaFlip = Math.round(resolvedFlip * 10) / 10;
 
@@ -345,11 +340,12 @@ function alignExpirySummaryToMenthorqStyle(
 }
 
 /**
- * Phase 9.6: front-expiry regime boundary = lowest durable negative→positive
- * net-GEX transition within the near-spot window. Mirrors the all-exp HVL logic
- * so 0DTE / 1DTE HVL lines are consistent and never snap to a far tail cross.
+ * Phase 9.7 — front-expiry HVL, identical semantics to the all-exp engine:
+ * the highest strike still net-negative immediately below durable positive
+ * gamma. Returns the STRIKE itself (vendor reports HVL with a per-strike GEX
+ * value, proving it is a real strike rather than an interpolated zero-cross).
  */
-function frontRegimeBoundary(
+function frontRegimeBoundaryStrike(
   strikes: DailyReport["gamma"]["gex_strikes"],
   spot: number,
   windowPoints: number,
@@ -359,22 +355,20 @@ function frontRegimeBoundary(
     .sort((a, b) => a.strike - b.strike);
   if (ps.length < 2) return null;
   const LOOKAHEAD = 3;
-  const cands: Array<{ price: number; posMass: number }> = [];
+  const boundaries: Array<{ strike: number; posMass: number }> = [];
   for (let i = 0; i < ps.length - 1; i++) {
-    const a = ps[i];
-    const b = ps[i + 1];
-    if (!(a.net_gex < 0 && b.net_gex > 0)) continue;
+    const here = ps[i];
+    const next = ps[i + 1];
+    if (!(here.net_gex < 0 && next.net_gex > 0)) continue;
     let ahead = 0;
     for (let k = i + 1; k < Math.min(ps.length, i + 1 + LOOKAHEAD); k++) ahead += ps[k].net_gex;
     if (ahead <= 0) continue;
-    const denom = b.net_gex - a.net_gex;
-    const price = denom !== 0 ? a.strike + (-a.net_gex / denom) * (b.strike - a.strike) : a.strike;
-    cands.push({ price, posMass: ahead });
+    boundaries.push({ strike: here.strike, posMass: ahead });
   }
-  if (!cands.length) return null;
-  const massFloor = Math.max(...cands.map((c) => c.posMass)) * 0.25;
-  const durable = cands.filter((c) => c.posMass >= massFloor).sort((x, y) => x.price - y.price);
-  return durable[0]?.price ?? null;
+  if (!boundaries.length) return null;
+  const massFloor = Math.max(...boundaries.map((b) => b.posMass)) * 0.25;
+  const durable = boundaries.filter((b) => b.posMass >= massFloor).sort((a, b) => a.strike - b.strike);
+  return durable[0]?.strike ?? null;
 }
 
 export function buildCmeExpiryBreakdown(
@@ -622,8 +616,46 @@ function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOut
   const isPositive = report.gamma.status === "positive";
   const flipDistancePts = Math.round(spot - flip);
   const flipBuffer = Math.max(35, Math.round(report.price.expected_move.points * 0.12));
-  const bullishBreak = Math.round(flip + flipBuffer);
-  const bearishBreak = Math.round(flip - flipBuffer);
+
+  // ===================================================================
+  // Phase 9.7 — TRIGGER MODE SELECTION (flip mode vs wall mode)
+  //
+  // The old code always anchored triggers to the Gamma Flip. When price is far
+  // ABOVE the flip (07-09: spot 29,937 vs HVL 29,720 → +217pts), that produced a
+  // bull trigger at ~29,637 — already 300pts BELOW spot, so the bullish scenario
+  // would fire the moment the session opened without selling off. Meaningless.
+  //
+  // Reality: once price has left the flip zone, the day's battleground is the
+  // CALL WALL (upside) / PUT WALL (downside), not the flip. So:
+  //   • FLIP MODE  — price is inside the flip zone (|spot − flip| <= ~0.6×EM):
+  //                  triggers straddle the flip, as before.
+  //   • WALL MODE  — price is clearly above the flip: continuation requires
+  //                  accepting ABOVE the call wall; the bear trigger becomes a
+  //                  loss of structure (back below the flip), with an earlier
+  //                  warning level between spot and flip.
+  // ===================================================================
+  // Flip zone = the chop band around HVL where neither side has structure. Kept
+  // deliberately tight: on 07-09 spot sat 217pts (0.7%) above HVL, which is
+  // clearly OUT of the flip zone and into wall-mode territory. A width of
+  // 0.4×EM (≈150pts) captures genuine straddling without swallowing real moves.
+  const flipZoneWidth = Math.max(100, report.price.expected_move.points * 0.4);
+  const aboveFlipZone = spot > flip + flipZoneWidth;
+  const belowFlipZone = spot < flip - flipZoneWidth;
+  const wallMode = (aboveFlipZone && callWall !== null) || (belowFlipZone && putWall !== null);
+
+  let bullishBreak: number;
+  let bearishBreak: number;
+  if (wallMode && aboveFlipZone && callWall !== null) {
+    // Upside continuation must clear the call wall; downside = structure loss.
+    bullishBreak = Math.round(callWall + Math.max(5, report.price.expected_move.points * 0.015));
+    bearishBreak = Math.round(flip);
+  } else if (wallMode && belowFlipZone && putWall !== null) {
+    bearishBreak = Math.round(putWall - Math.max(5, report.price.expected_move.points * 0.015));
+    bullishBreak = Math.round(flip);
+  } else {
+    bullishBreak = Math.round(flip + flipBuffer);
+    bearishBreak = Math.round(flip - flipBuffer);
+  }
 
   const positiveGex = report.gamma.gex_strikes.filter((s) => s.net_gex > 0).reduce((acc, s) => acc + s.net_gex, 0);
   const negativeGexAbs = Math.abs(report.gamma.gex_strikes.filter((s) => s.net_gex < 0).reduce((acc, s) => acc + s.net_gex, 0));
@@ -695,11 +727,19 @@ function buildPremarketBias(report: DailyReport, nearFlip: boolean): PlaybookOut
   }
 
   const confidence = capConfidence(report.regime.conviction ?? report.data_confidence, nearFlip ? "low" : report.data_confidence);
+  // Phase 9.7: when price already sits well above the flip, the narrative must
+  // be about the call wall, not about "whether the flip gets accepted" — the
+  // latter reads absurd when spot is 300+ points above it.
+  const wallNarrative = wallMode && aboveFlipZone && callWall !== null
+    ? `價格已位於 Gamma Flip (${Math.round(flip)}) 上方 ${Math.abs(flipDistancePts)} 點，正 Gamma 結構偏多測試。今日重點不是 Flip 能否被接受，而是 ${callWall} Call Wall 能否有效突破；若無法站穩，正 Gamma 環境容易回落至 ${Math.round(flip)} 一線。`
+    : null;
   const summary = isNegative
     ? `盤前結構偏空擴張：Net GEX 為負，且下方 Put/GEX 防守厚度高於上方推動力。執行上仍要等價格離開 HVL / Flip zone；目前距離 Flip 約 ${Math.abs(flipDistancePts)} 點，不可在中間追單。`
-    : direction === "range"
-      ? `盤前偏區間：正 Gamma / 邊界未破時，優先看 ${putWall ?? "Put Wall"} 到 ${callWall ?? "Call Wall"} 的反應，不追中間價。`
-      : `盤前等待確認：先看 ${Math.round(flip)} 附近能否被接受，再判斷偏多或偏空。`;
+    : wallNarrative
+      ? wallNarrative
+      : direction === "range"
+        ? `盤前偏區間：正 Gamma / 邊界未破時，優先看 ${putWall ?? "Put Wall"} 到 ${callWall ?? "Call Wall"} 的反應，不追中間價。`
+        : `盤前等待確認：先看 ${Math.round(flip)} 附近能否被接受，再判斷偏多或偏空。`;
 
   return {
     direction,

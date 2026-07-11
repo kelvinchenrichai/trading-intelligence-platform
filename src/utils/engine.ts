@@ -335,61 +335,61 @@ export function analyzeMarketStructure(
     flipLevel = lastPrice;
   }
 
-  // MenthorQ-style HVL refinement (Phase 9.6 — local regime boundary, wall-aware):
+  // ===================================================================
+  // HVL / Gamma Flip — Phase 9.7 (reverse-engineered from vendor charts)
   //
-  // Definitions in play:
-  //  • Cumulative-zero flip  = price where net GEX summed from the window bottom
-  //    crosses zero. This is pulled UP toward spot by the huge positive walls
-  //    above 30,000 (their mass dominates the running sum), giving ≈29,860.
-  //  • Local regime boundary = the sign flip that separates the contiguous
-  //    negative-gamma band (below) from the contiguous positive-gamma band
-  //    (above). This is where desks draw HVL — for 07-09 the −6,601 @29,720 →
-  //    +263,092 @29,850 flip, i.e. ≈29,720.
+  // GROUND TRUTH (from MenthorQ's own published values for 2026-07-09):
+  //   All-exp:  HVL = 29,720  and that strike's net GEX = −6,601
+  //   0DTE:     HVL = 29,590  and that strike's net GEX = −4,603
   //
-  // MenthorQ's HVL tracks the LOCAL boundary, not the cumulative zero. We find
-  // the highest strike that is still net-negative before the profile turns and
-  // STAYS net-positive into the call-wall region, then interpolate that flip.
-  // The cumulative value is retained only as a sanity bound.
-  const profileFlipWindow = Math.max(700, expectedMovePoints * 1.6);
-  const profileStrikes = [...gexStrikes]
-    .filter((s) => Math.abs(s.strike - lastPrice) <= profileFlipWindow)
+  // The HVL is reported WITH a per-strike GEX value, which means it is an
+  // ACTUAL STRIKE, not an interpolated zero-crossing. Specifically it is the
+  // LAST NEGATIVE-GEX STRIKE before the profile turns positive — i.e. the top
+  // edge of the contiguous negative-gamma band, immediately below the positive
+  // call-wall region.
+  //
+  // This explains every previous miss:
+  //   • bottom-up cumulative zero-cross  → ~29,860 (too high; positive walls
+  //     above dominate the running sum)
+  //   • interpolated local sign-flip     → ~29,723/29,730 (close, but it lands
+  //     BETWEEN 29,720 and 29,850 rather than ON the 29,720 strike)
+  //   • "nearest transition to spot"     → 29,959 (spot magnet)
+  //
+  // Correct algorithm: walk the near-spot profile upward, find the highest
+  // strike that is still net-negative and is immediately followed by durable
+  // positive gamma. Return that STRIKE ITSELF (no interpolation).
+  // ===================================================================
+  const hvlWindow = Math.max(700, expectedMovePoints * 1.6);
+  const hvlProfile = [...gexStrikes]
+    .filter((s) => Math.abs(s.strike - lastPrice) <= hvlWindow)
     .sort((a, b) => a.strike - b.strike);
 
-  let boundaryFlip: number | null = null;
-  if (profileStrikes.length >= 2) {
-    // Walk upward; find the last negative→positive transition where the positive
-    // side is "durable" (leads into positive wall mass rather than a lone blip).
-    // Durability check: within the next few strikes above the flip, cumulative
-    // local GEX stays positive. This ignores tiny mixed-sign noise near spot.
+  let hvlStrike: number | null = null;
+  if (hvlProfile.length >= 2) {
     const LOOKAHEAD = 3;
-    const candidates: Array<{ price: number; posMass: number }> = [];
-    for (let i = 0; i < profileStrikes.length - 1; i++) {
-      const a = profileStrikes[i];
-      const b = profileStrikes[i + 1];
-      if (!(a.net_gex < 0 && b.net_gex > 0)) continue;
-      // durability: sum of net GEX over the next LOOKAHEAD strikes must stay > 0
+    const boundaries: Array<{ strike: number; posMass: number }> = [];
+    for (let i = 0; i < hvlProfile.length - 1; i++) {
+      const here = hvlProfile[i];
+      const next = hvlProfile[i + 1];
+      if (!(here.net_gex < 0 && next.net_gex > 0)) continue;
+      // Durability: the positive side must persist, not be a lone blip.
       let ahead = 0;
-      for (let k = i + 1; k < Math.min(profileStrikes.length, i + 1 + LOOKAHEAD); k++) ahead += profileStrikes[k].net_gex;
+      for (let k = i + 1; k < Math.min(hvlProfile.length, i + 1 + LOOKAHEAD); k++) ahead += hvlProfile[k].net_gex;
       if (ahead <= 0) continue;
-      const denom = b.net_gex - a.net_gex;
-      const price = denom !== 0 ? a.strike + (-a.net_gex / denom) * (b.strike - a.strike) : a.strike;
-      candidates.push({ price, posMass: ahead });
+      boundaries.push({ strike: here.strike, posMass: ahead });
     }
-    if (candidates.length) {
-      // The regime boundary is the LOWEST durable negative→positive flip: the
-      // bottom of the positive-gamma zone. Selecting by max posMass would always
-      // snap to the flip adjacent to the 30,000 mega-wall (its lookahead borrows
-      // the wall's mass), pulling HVL up toward spot. Instead we require a mass
-      // floor (filter out tiny near-spot wiggles) then take the lowest strike.
-      const massFloor = Math.max(...candidates.map((c) => c.posMass)) * 0.25;
-      const durable = candidates.filter((c) => c.posMass >= massFloor);
-      durable.sort((x, y) => x.price - y.price);
-      boundaryFlip = durable[0]?.price ?? candidates.sort((x, y) => y.posMass - x.posMass)[0].price;
+    if (boundaries.length) {
+      // The regime boundary is the LOWEST durable transition (bottom of the
+      // positive-gamma zone). Selecting by max posMass would snap to whichever
+      // flip sits next to the biggest call wall and drag HVL up toward spot.
+      const massFloor = Math.max(...boundaries.map((b) => b.posMass)) * 0.25;
+      const durable = boundaries.filter((b) => b.posMass >= massFloor).sort((a, b) => a.strike - b.strike);
+      hvlStrike = durable[0]?.strike ?? null;
     }
   }
 
-  if (boundaryFlip !== null && Math.abs(boundaryFlip - lastPrice) <= profileFlipWindow) {
-    flipLevel = boundaryFlip;
+  if (hvlStrike !== null) {
+    flipLevel = hvlStrike; // an actual strike — matches vendor semantics
   }
 
   flipLevel = Math.round(flipLevel * 10) / 10;
