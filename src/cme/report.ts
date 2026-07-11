@@ -292,15 +292,19 @@ function alignExpirySummaryToMenthorqStyle(
   // This specifically prevents 28,500 or 29,350 from becoming the active 0DTE
   // put wall when the paid benchmark uses the 29,000 defense zone.
   if (summary.dte <= 1) {
-    const callMin = spot + Math.max(120, em * 0.32);
+    // Phase 9.8 FIX: the old lower bound was spot + max(120, 0.32×EM) = 30,057
+    // on 07-09, which EXCLUDED 30,000 from the candidate band entirely — so the
+    // resonance logic could never select it and 30,400 won by default. When the
+    // dominant call wall sits just above spot (as it does when price is pressed
+    // against it), it must remain eligible. Use a small absolute buffer instead.
+    const callMin = spot + Math.max(30, em * 0.08);
     const callMax = spot + Math.max(500, em * 1.35);
     const callAnchor = summary.dte === 0 ? spot + em * 0.55 : (allCall ?? spot + em);
     const rawFrontCall = strongestStrikeInBand(summary.gexStrikes, callMin, callMax, "call", callAnchor)
       ?? (allCall !== null && allCall >= callMin && allCall <= callMax + 200 ? allCall : null);
-    // Phase 9.5: a 0DTE call wall is a trading barrier, not a raw max-GEX pick.
-    // Apply resonance + round-number bonuses so a slightly-larger far strike
-    // (e.g. 30,400) cannot outrank a structurally dominant nearer level
-    // (e.g. 30,000 = all-exp call wall + integer + first resistance above spot).
+    // A 0DTE call wall is a trading barrier, not a raw max-GEX pick. Resonance
+    // with the all-exp wall + round-number weighting keeps a structurally
+    // dominant nearer level (30,000) ahead of a smaller far strike (30,400).
     const frontCall = preferResonantWall(
       summary.gexStrikes, rawFrontCall, allCall, spot, callMin, callMax, "call",
     );
@@ -340,35 +344,44 @@ function alignExpirySummaryToMenthorqStyle(
 }
 
 /**
- * Phase 9.7 — front-expiry HVL, identical semantics to the all-exp engine:
- * the highest strike still net-negative immediately below durable positive
- * gamma. Returns the STRIKE itself (vendor reports HVL with a per-strike GEX
- * value, proving it is a real strike rather than an interpolated zero-cross).
+ * Phase 9.8 — front-expiry HVL, identical semantics to the all-exp engine.
+ *
+ * Two-step rule, verified against the real 2026-07-09 chain:
+ *   1. SIGNIFICANCE FILTER — the CME chain carries many thin off-grid strikes
+ *      (29,600 / 29,675 / 29,725 …) holding only a handful of contracts. Their
+ *      sign flips are noise and previously dragged the HVL far away from the
+ *      real boundary. Keep only strikes whose |net GEX| is at least the median
+ *      of the window.
+ *   2. LAST NEGATIVE before sustained positive gamma — the TOP edge of the
+ *      negative-gamma band. Return the STRIKE itself (vendors publish HVL with
+ *      a per-strike GEX value, so it is a real strike, not an interpolation).
  */
 function frontRegimeBoundaryStrike(
   strikes: DailyReport["gamma"]["gex_strikes"],
   spot: number,
   windowPoints: number,
 ): number | null {
-  const ps = strikes
+  const raw = strikes
     .filter((s) => Math.abs(s.strike - spot) <= windowPoints)
     .sort((a, b) => a.strike - b.strike);
+  if (raw.length < 2) return null;
+
+  const magnitudes = raw.map((s) => Math.abs(s.net_gex)).sort((a, b) => a - b);
+  const median = magnitudes[Math.floor(magnitudes.length / 2)] || 0;
+  const significanceFloor = Math.max(median, 1);
+  const ps = raw.filter((s) => Math.abs(s.net_gex) >= significanceFloor);
   if (ps.length < 2) return null;
-  const LOOKAHEAD = 3;
-  const boundaries: Array<{ strike: number; posMass: number }> = [];
+
+  const LOOKAHEAD = 2;
+  let boundary: number | null = null;
   for (let i = 0; i < ps.length - 1; i++) {
-    const here = ps[i];
-    const next = ps[i + 1];
-    if (!(here.net_gex < 0 && next.net_gex > 0)) continue;
-    let ahead = 0;
-    for (let k = i + 1; k < Math.min(ps.length, i + 1 + LOOKAHEAD); k++) ahead += ps[k].net_gex;
-    if (ahead <= 0) continue;
-    boundaries.push({ strike: here.strike, posMass: ahead });
+    if (ps[i].net_gex >= 0) continue;
+    const ahead = ps.slice(i + 1, i + 1 + LOOKAHEAD);
+    if (!ahead.length) continue;
+    if (!ahead.every((s) => s.net_gex > 0)) continue;
+    boundary = ps[i].strike; // keep updating → ends on the LAST such strike
   }
-  if (!boundaries.length) return null;
-  const massFloor = Math.max(...boundaries.map((b) => b.posMass)) * 0.25;
-  const durable = boundaries.filter((b) => b.posMass >= massFloor).sort((a, b) => a.strike - b.strike);
-  return durable[0]?.strike ?? null;
+  return boundary;
 }
 
 export function buildCmeExpiryBreakdown(

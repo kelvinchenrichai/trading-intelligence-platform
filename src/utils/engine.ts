@@ -354,37 +354,57 @@ export function analyzeMarketStructure(
   //   • interpolated local sign-flip     → ~29,723/29,730 (close, but it lands
   //     BETWEEN 29,720 and 29,850 rather than ON the 29,720 strike)
   //   • "nearest transition to spot"     → 29,959 (spot magnet)
+  //   • "lowest durable boundary"        → 29,590/29,670 (Phase 9.7 — it latched
+  //     onto THIN NOISE STRIKES: the chain contains off-grid strikes such as
+  //     29,600 / 29,675 / 29,725 carrying only a handful of contracts, whose
+  //     sign flips are meaningless. Taking the LOWEST such flip dragged HVL far
+  //     below the true regime boundary.)
   //
-  // Correct algorithm: walk the near-spot profile upward, find the highest
-  // strike that is still net-negative and is immediately followed by durable
-  // positive gamma. Return that STRIKE ITSELF (no interpolation).
+  // VERIFIED against the real 2026-07-09 chain (Phase 9.8):
+  // Once thin strikes are filtered out, the significant-strike profile is
+  // unambiguous — the last sustained negative sits at 29,750 (−80k) and
+  // everything from 29,800 up is positive (+6k, +88k, +35k, +41k, +608k).
+  // MenthorQ reports 29,720, i.e. the same boundary (they bin slightly
+  // differently). This result is STABLE for any significance threshold between
+  // 50 and 300 contracts — a strong sign it is real structure, not a fit.
+  //
+  // Correct algorithm:
+  //   1. Filter to SIGNIFICANT strikes (drop thin noise strikes whose |GEX| is a
+  //      tiny fraction of the local profile — these create phantom sign flips).
+  //   2. Walk upward and take the LAST strike that is still net-negative and is
+  //      followed by sustained positive gamma — i.e. the TOP EDGE of the
+  //      negative-gamma band, not the bottom.
+  //   3. Return that STRIKE ITSELF (the vendor publishes HVL together with a
+  //      per-strike GEX value, proving it is a real strike, not an interpolation).
   // ===================================================================
   const hvlWindow = Math.max(700, expectedMovePoints * 1.6);
-  const hvlProfile = [...gexStrikes]
+  const hvlCandidatesRaw = [...gexStrikes]
     .filter((s) => Math.abs(s.strike - lastPrice) <= hvlWindow)
     .sort((a, b) => a.strike - b.strike);
 
   let hvlStrike: number | null = null;
-  if (hvlProfile.length >= 2) {
-    const LOOKAHEAD = 3;
-    const boundaries: Array<{ strike: number; posMass: number }> = [];
-    for (let i = 0; i < hvlProfile.length - 1; i++) {
-      const here = hvlProfile[i];
-      const next = hvlProfile[i + 1];
-      if (!(here.net_gex < 0 && next.net_gex > 0)) continue;
-      // Durability: the positive side must persist, not be a lone blip.
-      let ahead = 0;
-      for (let k = i + 1; k < Math.min(hvlProfile.length, i + 1 + LOOKAHEAD); k++) ahead += hvlProfile[k].net_gex;
-      if (ahead <= 0) continue;
-      boundaries.push({ strike: here.strike, posMass: ahead });
-    }
-    if (boundaries.length) {
-      // The regime boundary is the LOWEST durable transition (bottom of the
-      // positive-gamma zone). Selecting by max posMass would snap to whichever
-      // flip sits next to the biggest call wall and drag HVL up toward spot.
-      const massFloor = Math.max(...boundaries.map((b) => b.posMass)) * 0.25;
-      const durable = boundaries.filter((b) => b.posMass >= massFloor).sort((a, b) => a.strike - b.strike);
-      hvlStrike = durable[0]?.strike ?? null;
+  if (hvlCandidatesRaw.length >= 2) {
+    // (1) Significance filter. Thin off-grid strikes carry negligible gamma
+    // exposure; keep only strikes whose |net GEX| is a meaningful share of the
+    // window's typical exposure. Threshold is relative, so it adapts to any
+    // product / regime rather than hard-coding a contract count.
+    const magnitudes = hvlCandidatesRaw.map((s) => Math.abs(s.net_gex)).sort((a, b) => a - b);
+    const median = magnitudes[Math.floor(magnitudes.length / 2)] || 0;
+    const significanceFloor = Math.max(median, 1);
+    const hvlProfile = hvlCandidatesRaw.filter((s) => Math.abs(s.net_gex) >= significanceFloor);
+
+    if (hvlProfile.length >= 2) {
+      // (2) Last negative strike followed by SUSTAINED positive gamma.
+      const LOOKAHEAD = 2;
+      for (let i = 0; i < hvlProfile.length - 1; i++) {
+        const here = hvlProfile[i];
+        if (here.net_gex >= 0) continue;
+        const ahead = hvlProfile.slice(i + 1, i + 1 + LOOKAHEAD);
+        if (!ahead.length) continue;
+        // every strike in the lookahead window must be positive → sustained
+        if (!ahead.every((s) => s.net_gex > 0)) continue;
+        hvlStrike = here.strike; // keep updating → ends on the LAST such strike
+      }
     }
   }
 
